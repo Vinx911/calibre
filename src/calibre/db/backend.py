@@ -1330,14 +1330,14 @@ class DB:
         if self.is_deletable(path):
             rmtree_with_retry(path)
 
-    def construct_path_name(self, book_id, title, author):
+    def construct_path_name(self, book_id, title, author, tags):
         '''
         Construct the directory name for this book based on its metadata.
         '''
-        book_id = ' (%d)' % book_id
-        l = self.PATH_LIMIT - (len(book_id) // 2) - 2
-        author = ascii_filename(author)[:l]
-        title  = ascii_filename(title.lstrip())[:l].rstrip()
+        _book_id = ' (%d)' % book_id
+        l = self.PATH_LIMIT - (len(_book_id) // 2) - 2
+        #author = ascii_filename(author)[:l]
+        title  = title.lstrip()[:l].rstrip()
         if not title:
             title = 'Unknown'[:l]
         try:
@@ -1349,7 +1349,14 @@ class DB:
             author = ascii_filename(_('Unknown'))
         if author.upper() in WINDOWS_RESERVED_NAMES:
             author += 'w'
-        return f'{author}/{title}{book_id}'
+            
+        tags = tags.replace('.', '/')
+        
+        # 替换非法路径字符
+        for c in '\/:*?"<>|':
+            title = title.replace(c,'_')
+        
+        return f'{tags}/{book_id}-{title}'
 
     def construct_file_name(self, book_id, title, author, extlen):
         '''
@@ -1363,8 +1370,8 @@ class DB:
         l = (self.PATH_LIMIT - (extlen // 2) - 2) if iswindows else ((self.PATH_LIMIT - extlen - 2) // 2)
         if l < 5:
             raise ValueError('Extension length too long: %d' % extlen)
-        author = ascii_filename(author)[:l]
-        title  = ascii_filename(title.lstrip())[:l].rstrip()
+        #author = ascii_filename(author)[:l]
+        #title  = ascii_filename(title.lstrip())[:l].rstrip()
         if not title:
             title = 'Unknown'[:l]
         name   = title + ' - ' + author
@@ -1372,6 +1379,11 @@ class DB:
             name = name[:-1]
         if not name:
             name = ascii_filename(_('Unknown'))
+            
+        # 替换非法路径字符
+        for c in '\/:*?"<>|':
+            name = name.replace(c,'_')
+            
         return name
 
     # Database layer API {{{
@@ -1722,8 +1734,8 @@ class DB:
 
         return size, fname
 
-    def update_path(self, book_id, title, author, path_field, formats_field):
-        path = self.construct_path_name(book_id, title, author)
+    def update_path(self, book_id, title, author, tags, path_field, formats_field):
+        path = self.construct_path_name(book_id, title, author, tags)
         current_path = path_field.for_book(book_id, default_value='')
         formats = formats_field.for_book(book_id, default_value=())
         try:
@@ -1782,9 +1794,15 @@ class DB:
                         if wam is not None:
                             wam.delete_originals()
                         self.rmtree(spath)
-                        parent = os.path.dirname(spath)
-                        if len(os.listdir(parent)) == 0:
-                            self.rmtree(parent)
+
+                        parent = os.path.dirname(spath)                                                   
+                        while self.library_path != parent:
+                            if len(os.listdir(parent)) == 0:
+                                self.rmtree(parent)
+                            else:
+                                break
+                            
+                            parent = os.path.dirname(parent)
         finally:
             if wam is not None:
                 wam.close_handles()

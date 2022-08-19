@@ -1448,7 +1448,7 @@ class Cache:
         '''
         f = self.fields[name]
         is_series = f.metadata['datatype'] == 'series'
-        update_path = name in {'title', 'authors'}
+        update_path = name in {'title', 'authors', 'tags'}
         if update_path and iswindows:
             paths = (x for x in (self._field_for('path', book_id) for book_id in book_id_to_val_map) if x)
             self.backend.windows_check_if_files_in_use(paths)
@@ -1491,7 +1491,13 @@ class Cache:
                 author = self._field_for('authors', book_id, default_value=(_('Unknown'),))[0]
             except IndexError:
                 author = _('Unknown')
-            self.backend.update_path(book_id, title, author, self.fields['path'], self.fields['formats'])
+                
+            try:
+                tags = self._field_for('tags', book_id, default_value=(_('Unknown'),))[0]
+            except IndexError:
+                tags = _('Unknown')
+                
+            self.backend.update_path(book_id, title, author, tags, self.fields['path'], self.fields['formats'])
             self.format_metadata_cache.pop(book_id, None)
             if mark_as_dirtied:
                 self._mark_as_dirty(book_ids)
