@@ -2,23 +2,22 @@
 # License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 
 
+import apsw
 import os
 import re
 import sys
 import time
 import traceback
-
-import apsw
 from qt.core import QCoreApplication, QIcon, QObject, QTimer
 
 from calibre import force_unicode, prints
 from calibre.constants import (
-    DEBUG, MAIN_APP_UID, __appname__, filesystem_encoding, get_portable_base,
-    islinux, ismacos, iswindows
+    DEBUG, MAIN_APP_UID, __appname__, filesystem_encoding, get_portable_base, islinux,
+    ismacos, iswindows,
 )
 from calibre.gui2 import (
     Application, choose_dir, error_dialog, gprefs, initialize_file_icon_provider,
-    question_dialog, setup_gui_option_parser
+    question_dialog, setup_gui_option_parser,
 )
 from calibre.gui2.listener import send_message_in_process
 from calibre.gui2.main_window import option_parser as _option_parser
@@ -26,6 +25,7 @@ from calibre.gui2.splash_screen import SplashScreen
 from calibre.utils.config import dynamic, prefs
 from calibre.utils.lock import SingleInstance
 from calibre.utils.monotonic import monotonic
+from calibre.utils.resources import get_image_path as I
 from polyglot.builtins import as_bytes, environ_item
 
 after_quit_actions = {'debug_on_restart': False, 'restart_after_quit': False, 'no_plugins_on_restart': False}
@@ -197,6 +197,7 @@ def repair_library(library_path):
 
 def windows_repair(library_path=None):
     import subprocess
+
     from calibre.utils.serialize import json_dumps, json_loads
     from polyglot.binary import as_hex_unicode, from_hex_bytes
     if library_path:
@@ -380,13 +381,15 @@ class GuiRunner(QObject):
 
 
 def run_in_debug_mode():
+    import subprocess
+    import tempfile
+
     from calibre.debug import run_calibre_debug
-    import tempfile, subprocess
     fd, logpath = tempfile.mkstemp('.txt')
     os.close(fd)
     run_calibre_debug(
-        '--gui-debug', logpath, stdout=lopen(logpath, 'wb'),
-        stderr=subprocess.STDOUT, stdin=lopen(os.devnull, 'rb'))
+        '--gui-debug', logpath, stdout=open(logpath, 'wb'),
+        stderr=subprocess.STDOUT, stdin=open(os.devnull, 'rb'))
 
 
 def run_gui(opts, args, app, gui_debug=None):
@@ -434,6 +437,8 @@ def run_gui_(opts, args, app, gui_debug=None):
         debugfile = runner.main.gui_debug
         from calibre.gui2 import open_local_file
         if iswindows:
+            # detach the stdout/stderr/stdin handles
+            winutil.prepare_for_restart()
             with open(debugfile, 'r+b') as f:
                 raw = f.read()
                 raw = re.sub(b'(?<!\r)\n', b'\r\n', raw)
@@ -490,6 +495,9 @@ def communicate(opts, args, retry_communicate=False):
     else:
         if len(args) > 1:
             args[1:] = [os.path.abspath(x) if os.path.exists(x) else x for x in args[1:]]
+        if opts.with_library and os.path.isdir(os.path.expanduser(opts.with_library)):
+            library_id = os.path.basename(opts.with_library).replace(' ', '_').encode('utf-8').hex()
+            args.insert(1, 'calibre://switch-library/_hex_-' + library_id)
         import json
         if not send_message(b'launched:'+as_bytes(json.dumps(args)), retry_communicate=retry_communicate):
             raise SystemExit(_('Failed to contact running instance of calibre'))

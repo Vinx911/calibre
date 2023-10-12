@@ -10,29 +10,29 @@ import os
 import textwrap
 from functools import partial
 from qt.core import (
-    QAbstractItemView, QAbstractListModel, QApplication, QCheckBox, QComboBox,
-    QDialog, QDialogButtonBox, QDoubleValidator, QFrame, QGridLayout, QIcon,
-    QIntValidator, QItemSelectionModel, QLabel, QLineEdit, QListView,
-    QPalette, QPushButton, QScrollArea, QSize, QSizePolicy, QSpacerItem,
-    QStandardItem, QStandardItemModel, Qt, QToolButton, QVBoxLayout, QWidget,
-    QItemSelection, QListWidget, QListWidgetItem, pyqtSignal
+    QAbstractItemView, QAbstractListModel, QApplication, QCheckBox, QComboBox, QDialog,
+    QDialogButtonBox, QDoubleValidator, QFrame, QGridLayout, QIcon, QIntValidator,
+    QItemSelection, QItemSelectionModel, QLabel, QLineEdit, QListView, QListWidget,
+    QListWidgetItem, QPalette, QPushButton, QScrollArea, QSize, QSizePolicy,
+    QSpacerItem, QStandardItem, QStandardItemModel, Qt, QToolButton, QVBoxLayout,
+    QWidget, pyqtSignal,
 )
 
 from calibre import as_unicode, prepare_string_for_xml, sanitize_file_name
 from calibre.constants import config_dir
 from calibre.gui2 import (
     choose_files, choose_save_file, error_dialog, gprefs, open_local_file,
-    pixmap_to_data, question_dialog
+    pixmap_to_data, question_dialog,
 )
 from calibre.gui2.dialogs.template_dialog import TemplateDialog
 from calibre.gui2.metadata.single_download import RichTextDelegate
+from calibre.gui2.preferences import ListViewWithMoveByKeyPress
 from calibre.gui2.widgets2 import ColorButton, FlowLayout, Separator
 from calibre.library.coloring import (
-    Rule, color_row_key, conditionable_columns, displayable_columns,
-    rule_from_template
+    Rule, color_row_key, conditionable_columns, displayable_columns, rule_from_template,
 )
 from calibre.utils.icu import lower, sort_key
-from calibre.utils.localization import lang_map
+from calibre.utils.localization import lang_map, ngettext
 from polyglot.builtins import iteritems
 
 all_columns_string = _('All columns')
@@ -956,10 +956,10 @@ class RulesModel(QAbstractListModel):  # {{{
 # }}}
 
 
-class RulesView(QListView):  # {{{
+class RulesView(ListViewWithMoveByKeyPress):  # {{{
 
     def __init__(self, parent, enable_convert_buttons_function):
-        QListView.__init__(self, parent)
+        ListViewWithMoveByKeyPress.__init__(self, parent)
         self.enable_convert_buttons_function = enable_convert_buttons_function
 
     def currentChanged(self, new, prev):
@@ -1016,6 +1016,8 @@ class EditRules(QWidget):  # {{{
         b.setIcon(QIcon.ic('arrow-down.png'))
         b.setToolTip(_('Move the selected rule down'))
         b.clicked.connect(partial(self.move_rows, moving_up=False))
+        self.rules_view.set_movement_functions(partial(self.move_rows, moving_up=True),
+                                               partial(self.move_rows, moving_up=False))
         g.addWidget(b, 1, 1, 1, 1, Qt.AlignmentFlag.AlignBottom)
 
         l.addLayout(g, l.rowCount(), 0, 1, 2)
@@ -1265,14 +1267,14 @@ class EditRules(QWidget):  # {{{
             data = json.dumps(rules, indent=2)
             if not isinstance(data, bytes):
                 data = data.encode('utf-8')
-            with lopen(path, 'wb') as f:
+            with open(path, 'wb') as f:
                 f.write(data)
 
     def import_rules(self):
         files = choose_files(self, 'import-coloring-rules', _('Choose file to import from'),
                                 filters=[(_('Rules'), ['rules'])], all_files=False, select_only_single_file=True)
         if files:
-            with lopen(files[0], 'rb') as f:
+            with open(files[0], 'rb') as f:
                 raw = f.read()
             try:
                 rules = json.loads(raw)

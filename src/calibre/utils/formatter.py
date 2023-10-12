@@ -3,21 +3,28 @@ Created on 23 Sep 2010
 
 @author: charles
 '''
-
 __license__   = 'GPL v3'
 __copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import re, string, traceback, numbers
+import numbers
+import re
+import string
+import traceback
+from collections import OrderedDict
 from functools import partial
 from math import modf
+from sys import exc_info
 
 from calibre import prints
 from calibre.constants import DEBUG
 from calibre.ebooks.metadata.book.base import field_metadata
 from calibre.utils.config import tweaks
-from calibre.utils.formatter_functions import formatter_functions
+from calibre.utils.formatter_functions import (
+    StoredObjectType, formatter_functions, function_object_type, get_database,
+)
 from calibre.utils.icu import strcmp
+from calibre.utils.localization import _
 from polyglot.builtins import error_message
 
 
@@ -53,6 +60,7 @@ class Node:
     NODE_LOCAL_FUNCTION_CALL = 29
     NODE_RANGE = 30
     NODE_SWITCH = 31
+    NODE_SWITCH_IF = 32
 
     def __init__(self, line_number, name):
         self.my_line_number = line_number
@@ -137,7 +145,8 @@ class StoredTemplateCallNode(Node):
     def __init__(self, line_number, name, function, expression_list):
         Node.__init__(self, line_number, 'call template: ' + name + '()')
         self.node_type = self.NODE_CALL_STORED_TEMPLATE
-        self.function = function
+        self.name = name
+        self.function = function  # instance of the definition class
         self.expression_list = expression_list
 
 
@@ -283,6 +292,13 @@ class SwitchNode(Node):
     def __init__(self, line_number, expression_list):
         Node.__init__(self, line_number, 'first_non_empty()')
         self.node_type = self.NODE_SWITCH
+        self.expression_list = expression_list
+
+
+class SwitchIfNode(Node):
+    def __init__(self, line_number, expression_list):
+        Node.__init__(self, line_number, 'switch_if()')
+        self.node_type = self.NODE_SWITCH_IF
         self.expression_list = expression_list
 
 
@@ -579,16 +595,20 @@ class _Parser:
         return LocalFunctionCallNode(self.line_number, name, arguments)
 
     def call_expression(self, name, arguments):
-        subprog = self.funcs[name].cached_parse_tree
-        if subprog is None:
+        compiled_func = self.funcs[name].cached_compiled_text
+        if compiled_func is None:
             text = self.funcs[name].program_text
-            if not text.startswith('program:'):
-                self.error(_("A stored template must begin with '{0}'").format('program:'))
-            text = text[len('program:'):]
-            subprog = _Parser().program(self.parent, self.funcs,
-                                        self.parent.lex_scanner.scan(text))
-            self.funcs[name].cached_parse_tree = subprog
-        return StoredTemplateCallNode(self.line_number, name, subprog, arguments)
+            if function_object_type(text) is StoredObjectType.StoredGPMTemplate:
+                text = text[len('program:'):]
+                compiled_func = _Parser().program(self.parent, self.funcs,
+                                            self.parent.lex_scanner.scan(text))
+            elif function_object_type(text) is StoredObjectType.StoredPythonTemplate:
+                text = text[len('python:'):]
+                compiled_func = self.parent.compile_python_template(text)
+            else:
+                self.error(_("A stored template must begin with '{0}' or {1}").format('program:', 'python:'))
+            self.funcs[name].cached_compiled_text = compiled_func
+        return StoredTemplateCallNode(self.line_number, name, self.funcs[name], arguments)
 
     def top_expr(self):
         return self.or_expr()
@@ -680,6 +700,8 @@ class _Parser:
                              lambda ln, args: FirstNonEmptyNode(ln, args)),
         'switch':           (lambda args: len(args) >= 3 and (len(args) %2) == 0,
                              lambda ln, args: SwitchNode(ln, args)),
+        'switch_if':        (lambda args: len(args) > 0 and (len(args) %2) == 1,
+                             lambda ln, args: SwitchIfNode(ln, args)),
         'assign':           (lambda args: len(args) == 2 and len(args[0]) == 1 and args[0][0].node_type == Node.NODE_RVALUE,
                              lambda ln, args: AssignNode(ln, args[0][0].name, args[1])),
         'contains':         (lambda args: len(args) == 4,
@@ -775,7 +797,7 @@ class _Parser:
             if id_ in self.local_functions:
                 return self.local_call_expression(id_, arguments)
             # Check for calling a stored template
-            if id_ in self.func_names and not self.funcs[id_].is_python:
+            if id_ in self.func_names and self.funcs[id_].object_type is not StoredObjectType.PythonFunction:
                 return self.call_expression(id_, arguments)
             # We must have a reference to a formatter function. Check if
             # the right number of arguments were supplied
@@ -823,6 +845,124 @@ class StopException(Exception):
         super().__init__('Template evaluation stopped')
 
 
+class PythonTemplateContext(object):
+
+    def __init__(self):
+        # Set attributes we already know must exist.
+        object.__init__(self)
+        self.db = None
+        self.arguments = None
+        self.globals = None
+        self.formatter = None
+        self.funcs = None
+        self.attrs_set = {'db', 'arguments', 'globals', 'funcs'}
+
+    def set_values(self, **kwargs):
+        # Create/set attributes from the named parameters. Doing it this way we
+        # aren't required to change the signature of this method if/when we add
+        # attributes in the future. However, if a user depends upon the
+        # existence of some attribute and the context creator doesn't supply it
+        # then the user will get an AttributeError exception.
+        for k,v in kwargs.items():
+            self.attrs_set.add(k)
+            setattr(self, k, v)
+
+    @property
+    def attributes(self):
+        # return a list of attributes in the context object
+        return sorted(list(self.attrs_set))
+
+    def __str__(self):
+        # return a string of the attribute with values separated by newlines
+        attrs = sorted(list(self.attrs_set))
+        ans = OrderedDict()
+        for k in attrs:
+            ans[k] = getattr(self, k, None)
+        return '\n'.join(f'{k}:{v}' for k,v in ans.items())
+
+
+class FormatterFuncsCaller:
+    '''
+    Provides a convenient solution to call functions loaded in the
+    TemplateFormatter. The functions are called using their name as an attribute
+    of this class, with an underscore at the end if the name conflicts with a
+    Python keyword. If the name contain a illegal character for a attribute
+    (like .:-), use getattr(). Example: context.funcs.list_re_group()
+    '''
+
+    def __init__(self, formatter):
+        if not isinstance(formatter, TemplateFormatter):
+            raise TypeError(f'{formatter} is not an instance of TemplateFormatter')
+        self.__formatter__ = formatter
+
+    def __getattribute__(self, name):
+        if name.startswith('__') and name.endswith('__'):  # return internal special attribute
+            try:
+                return object.__getattribute__(self, name)
+            except Exception:
+                pass
+
+        formatter = self.__formatter__
+        func_name = ''
+        if name.endswith('_') and name[:-1] in formatter.funcs:  # give the priority to the backup name
+            func_name = name[:-1]
+        elif name in formatter.funcs:
+            func_name = name
+
+        if func_name:
+
+            def call(*args, **kargs):
+                def n(d):
+                    return '' if d is None else str(d)
+                args = tuple(n(a) for a in args)
+
+                try:
+                    if kargs:
+                        raise ValueError(_('Keyword arguments are not allowed'))
+
+                    # special function
+                    if func_name == 'arguments':
+                        raise ValueError(_("Don't call {0}. Instead use {1}").format('arguments()', 'context.arguments'))
+                    if func_name == 'globals':
+                        raise ValueError(_("Don't call {0}. Instead use {1}").format('globals()', 'context.globals'))
+                    if func_name == 'set_globals':
+                        raise ValueError(_("Don't call {0}. Instead use {1}").format('set_globals()', "context.globals['name'] = val"))
+                    if func_name == 'character':
+                        if _Parser.inlined_function_nodes['character'][0](args):
+                            rslt = _Interpreter.characters.get(args[0])
+                            if rslt is None:
+                                raise ValueError(_("Invalid character name '{0}'").format(args[0]))
+                        else:
+                            raise ValueError(_('Incorrect number of arguments'))
+                    else:
+                        # built-in/user template functions and Stored GPM/Python templates
+                        func = formatter.funcs[func_name]
+                        if func.object_type == StoredObjectType.PythonFunction:
+                            rslt = func.evaluate(formatter, formatter.kwargs, formatter.book, formatter.locals, *args)
+                        else:
+                            rslt = formatter._eval_sfm_call(func_name, args, formatter.global_vars)
+
+                except Exception as e:
+                    # Change the error message to return the name used in the template
+                    e = e.__class__(_('Error in function {0} :: {1}').format(
+                            name,
+                            re.sub(r'\w+\.evaluate\(\)\s*', '', str(e), 1)))  # remove UserFunction.evaluate() | Builtin*.evaluate()
+                    e.is_internal = True
+                    raise e
+                return rslt
+
+            return call
+
+        e = AttributeError(_("No function named {!r} exists").format(name))
+        e.is_internal = True
+        raise e
+
+    def __dir__(self):
+        return list(set(object.__dir__(self) +
+                        list(self.__formatter__.funcs.keys()) +
+                        [f+'_' for f in self.__formatter__.funcs.keys()]))
+
+
 class _Interpreter:
     def error(self, message, line_number):
         m = _('Interpreter: {0} - line number {1}').format(message, line_number)
@@ -846,7 +986,8 @@ class _Interpreter:
 
         try:
             if is_call:
-                ret =  self.do_node_stored_template_call(StoredTemplateCallNode(1, prog, None), args=args)
+                # prog is an instance of the function definition class
+                ret =  self.do_node_stored_template_call(StoredTemplateCallNode(1, prog.name, prog, None), args=args)
             else:
                 ret = self.expression_list(prog)
         except ReturnExecuted as e:
@@ -1014,7 +1155,10 @@ class _Interpreter:
         else:
             saved_line_number = None
         try:
-            val = self.expression_list(prog.function)
+            if function_object_type(prog.function.program_text) is StoredObjectType.StoredGPMTemplate:
+                val = self.expression_list(prog.function.cached_compiled_text)
+            else:
+                val = self.parent._run_python_template(prog.function.cached_compiled_text, args)
         except ReturnExecuted as e:
             val = e.get_value()
         self.override_line_number = saved_line_number
@@ -1102,10 +1246,12 @@ class _Interpreter:
                 if (self.break_reporter):
                     self.break_reporter(prog.node_name, res, prog.line_number)
                 return res
+            except StopException:
+                raise
             except:
                 self.error(_("Unknown field '{0}'").format(name), prog.line_number)
-        except (StopException, ValueError) as e:
-            raise e
+        except (StopException, ValueError):
+            raise
         except:
             self.error(_("Unknown field '{0}'").format('internal parse error'),
                        prog.line_number)
@@ -1170,6 +1316,21 @@ class _Interpreter:
         res = self.expr(prog.expression_list[-1])
         if (self.break_reporter):
             self.break_reporter(prog.node_name, res, prog.line_number)
+        return res
+
+    def do_node_switch_if(self, prog):
+        for i in range(0, len(prog.expression_list)-1, 2):
+            tst = self.expr(prog.expression_list[i])
+            if self.break_reporter:
+                self.break_reporter("switch_if(): test expr", tst, prog.line_number)
+            if tst:
+                res = self.expr(prog.expression_list[i+1])
+                if self.break_reporter:
+                    self.break_reporter("switch_if(): value expr", res, prog.line_number)
+                return res
+        res = self.expr(prog.expression_list[-1])
+        if (self.break_reporter):
+            self.break_reporter("switch_if(): default expr", res, prog.line_number)
         return res
 
     def do_node_strcat(self, prog):
@@ -1388,6 +1549,7 @@ class _Interpreter:
         Node.NODE_CALL_STORED_TEMPLATE:  do_node_stored_template_call,
         Node.NODE_FIRST_NON_EMPTY:       do_node_first_non_empty,
         Node.NODE_SWITCH:                do_node_switch,
+        Node.NODE_SWITCH_IF:             do_node_switch_if,
         Node.NODE_FOR:                   do_node_for,
         Node.NODE_RANGE:                 do_node_range,
         Node.NODE_GLOBALS:               do_node_globals,
@@ -1447,6 +1609,8 @@ class TemplateFormatter(string.Formatter):
         self._template_parser = None
         self.recursion_stack = []
         self.recursion_level = -1
+        self._caller = None
+        self.python_context_object = None
 
     def _do_format(self, val, fmt):
         if not fmt or not val:
@@ -1526,14 +1690,78 @@ class TemplateFormatter(string.Formatter):
 
     def _eval_sfm_call(self, template_name, args, global_vars):
         func = self.funcs[template_name]
-        tree = func.cached_parse_tree
-        if tree is None:
-            tree = self.gpm_parser.program(self, self.funcs,
-                           self.lex_scanner.scan(func.program_text[len('program:'):]))
-            func.cached_parse_tree = tree
-        return self.gpm_interpreter.program(self.funcs, self, tree, None,
-                                            is_call=True, args=args,
-                                            global_vars=global_vars)
+        compiled_text = func.cached_compiled_text
+        if func.object_type is StoredObjectType.StoredGPMTemplate:
+            if compiled_text is None:
+                compiled_text = self.gpm_parser.program(self, self.funcs,
+                               self.lex_scanner.scan(func.program_text[len('program:'):]))
+                func.cached_compiled_text = compiled_text
+            return self.gpm_interpreter.program(self.funcs, self, func, None,
+                                                is_call=True, args=args,
+                                                global_vars=global_vars)
+        elif function_object_type(func) is StoredObjectType.StoredPythonTemplate:
+            if compiled_text is None:
+                compiled_text = self.compile_python_template(func.program_text[len('python:'):])
+                func.cached_compiled_text = compiled_text
+            return self._run_python_template(compiled_text, args)
+
+    def _eval_python_template(self, template, column_name):
+        if column_name is not None and self.template_cache is not None:
+            func = self.template_cache.get(column_name + '::python', None)
+            if not func:
+                func = self.compile_python_template(template)
+                self.template_cache[column_name + '::python'] = func
+        else:
+            func = self.compile_python_template(template)
+        return self._run_python_template(func, arguments=None)
+
+    def _run_python_template(self, compiled_template, arguments):
+        try:
+            self.python_context_object.set_values(
+                         db=get_database(self.book, get_database(self.book, None)),
+                         globals=self.global_vars,
+                         arguments=arguments,
+                         formatter=self,
+                         funcs=self._caller)
+            rslt = compiled_template(self.book, self.python_context_object)
+        except StopException:
+            raise
+        except Exception as e:
+            stack = traceback.extract_tb(exc_info()[2])
+            ss = stack[-1]
+            if getattr(e, 'is_internal', False):
+                # Exception raised by FormatterFuncsCaller
+                # get the line inside the current template instead of the FormatterFuncsCaller
+                for s in reversed(stack):
+                    if s.filename == '<string>':
+                        ss = s
+                        break
+
+            raise ValueError(_('Error in function {0} on line {1} : {2} - {3}').format(
+                            ss.name, ss.lineno, type(e).__name__, str(e)))
+        if not isinstance(rslt, str):
+            raise ValueError(_('The Python template returned a non-string value: {!r}').format(rslt))
+        return rslt
+
+    def compile_python_template(self, template):
+        def replace_func(mo):
+            return mo.group().replace('\t', '    ')
+
+        prog ='\n'.join([re.sub(r'^\t*', replace_func, line)
+                                           for line in template.splitlines()])
+        locals_ = {}
+        if DEBUG and tweaks.get('enable_template_debug_printing', False):
+            print(prog)
+        try:
+            exec(prog, locals_)
+            func = locals_['evaluate']
+            return func
+        except SyntaxError as e:
+            raise ValueError(
+                _('Syntax error on line {0} column {1}: text {2}').format(e.lineno, e.offset, e.text))
+        except KeyError:
+            raise ValueError(_("The {0} function is not defined in the template").format('evaluate'))
+
     # ################# Override parent classes methods #####################
 
     def get_value(self, key, args, kwargs):
@@ -1587,7 +1815,7 @@ class TemplateFormatter(string.Formatter):
                     else:
                         args = self.arg_parser.scan(fmt[p+1:])[0]
                         args = [self.backslash_comma_to_comma.sub(',', a) for a in args]
-                    if not func.is_python:
+                    if func.object_type is not StoredObjectType.PythonFunction:
                         args.insert(0, val)
                         val = self._eval_sfm_call(fname, args, self.global_vars)
                     else:
@@ -1615,6 +1843,8 @@ class TemplateFormatter(string.Formatter):
         if fmt.startswith('program:'):
             ans = self._eval_program(kwargs.get('$', None), fmt[8:],
                                      self.column_name, global_vars, break_reporter)
+        elif fmt.startswith('python:'):
+            ans = self._eval_python_template(fmt[7:], self.column_name)
         else:
             ans = self.vformat(fmt, args, kwargs)
             if self.strip_results:
@@ -1628,27 +1858,12 @@ class TemplateFormatter(string.Formatter):
     # reference can use different parameters when calling safe_format(). Because
     # the parameters are saved as instance variables they can possibly affect
     # the 'calling' template. To avoid this problem, save the current formatter
-    # state when recursion is detected. There is no point in saving the level
-    # 0 state.
+    # state when recursion is detected. Save state at level zero to be sure that
+    # all class instance variables are restored to their base settings.
 
     def save_state(self):
         self.recursion_level += 1
-        if self.recursion_level > 0:
-            return (
-                (self.strip_results,
-                 self.column_name,
-                 self.template_cache,
-                 self.kwargs,
-                 self.book,
-                 self.global_vars,
-                 self.funcs,
-                 self.locals))
-        else:
-            return None
-
-    def restore_state(self, state):
-        self.recursion_level -= 1
-        if state is not None:
+        return (
             (self.strip_results,
              self.column_name,
              self.template_cache,
@@ -1656,7 +1871,24 @@ class TemplateFormatter(string.Formatter):
              self.book,
              self.global_vars,
              self.funcs,
-             self.locals) = state
+             self.locals,
+             self._caller,
+             self.python_context_object))
+
+    def restore_state(self, state):
+        self.recursion_level -= 1
+        if state is None:
+            raise ValueError(_('Formatter state restored before saved'))
+        (self.strip_results,
+         self.column_name,
+         self.template_cache,
+         self.kwargs,
+         self.book,
+         self.global_vars,
+         self.funcs,
+         self.locals,
+         self._caller,
+         self.python_context_object) = state
 
     # Allocate an interpreter if the formatter encounters a GPM or TPM template.
     # We need to allocate additional interpreters if there is composite recursion
@@ -1681,9 +1913,11 @@ class TemplateFormatter(string.Formatter):
 
     # ######### a formatter that throws exceptions ############
 
-    def unsafe_format(self, fmt, kwargs, book, strip_results=True, global_vars=None):
+    def unsafe_format(self, fmt, kwargs, book, strip_results=True, global_vars=None,
+                      python_context_object=None):
         state = self.save_state()
         try:
+            self._caller = FormatterFuncsCaller(self)
             self.strip_results = strip_results
             self.column_name = self.template_cache = None
             self.kwargs = kwargs
@@ -1691,6 +1925,10 @@ class TemplateFormatter(string.Formatter):
             self.composite_values = {}
             self.locals = {}
             self.global_vars = global_vars if isinstance(global_vars, dict) else {}
+            if isinstance(python_context_object, PythonTemplateContext):
+                self.python_context_object = python_context_object
+            else:
+                self.python_context_object = PythonTemplateContext()
             return self.evaluate(fmt, [], kwargs, self.global_vars)
         finally:
             self.restore_state(state)
@@ -1700,19 +1938,25 @@ class TemplateFormatter(string.Formatter):
     def safe_format(self, fmt, kwargs, error_value, book,
                     column_name=None, template_cache=None,
                     strip_results=True, template_functions=None,
-                    global_vars=None, break_reporter=None):
+                    global_vars=None, break_reporter=None,
+                    python_context_object=None):
         state = self.save_state()
         if self.recursion_level == 0:
             # Initialize the composite values dict if this is the base-level
             # call. Recursive calls will use the same dict.
             self.composite_values = {}
         try:
+            self._caller = FormatterFuncsCaller(self)
             self.strip_results = strip_results
             self.column_name = column_name
             self.template_cache = template_cache
             self.kwargs = kwargs
             self.book = book
             self.global_vars = global_vars if isinstance(global_vars, dict) else {}
+            if isinstance(python_context_object, PythonTemplateContext):
+                self.python_context_object = python_context_object
+            else:
+                self.python_context_object = PythonTemplateContext()
             if template_functions:
                 self.funcs = template_functions
             else:

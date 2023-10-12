@@ -11,10 +11,9 @@ from contextlib import suppress
 from functools import partial
 from itertools import count
 from qt.core import (
-    QAbstractItemModel, QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
-    QFont, QHBoxLayout, QIcon, QLabel, QMenu, QModelIndex, QPixmap, QPushButton,
-    QRect, QSize, QSplitter, QStackedWidget, Qt, QTreeView, QVBoxLayout, QWidget,
-    pyqtSignal
+    QAbstractItemModel, QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFont,
+    QHBoxLayout, QIcon, QLabel, QMenu, QModelIndex, QPixmap, QPushButton, QRect, QSize,
+    QSplitter, QStackedWidget, Qt, QTreeView, QVBoxLayout, QWidget, pyqtSignal,
 )
 from threading import Event, Thread
 
@@ -22,14 +21,16 @@ from calibre import fit_image, prepare_string_for_xml
 from calibre.db import FTSQueryError
 from calibre.ebooks.metadata import authors_to_string, fmt_sidx
 from calibre.gui2 import (
-    config, error_dialog, gprefs, info_dialog, question_dialog, safe_open_url
+    config, error_dialog, gprefs, info_dialog, question_dialog, safe_open_url,
 )
 from calibre.gui2.fts.utils import get_db
+from calibre.gui2.library.models import render_pin
 from calibre.gui2.progress_indicator import ProgressIndicator
 from calibre.gui2.ui import get_gui
 from calibre.gui2.viewer.widgets import ResultsDelegate, SearchBox
 from calibre.gui2.widgets import BusyCursor
 from calibre.gui2.widgets2 import HTMLDisplay
+from calibre.utils.localization import ngettext
 
 ROOT = QModelIndex()
 sanitize_text_pat = re.compile(r'\s+')
@@ -42,10 +43,19 @@ def mark_books(*book_ids):
         gui.iactions['Mark Books'].add_ids(book_ids)
 
 
-def jump_to_book(book_id):
+def jump_to_book(book_id, parent=None):
     gui = get_gui()
     if gui is not None:
-        gui.library_view.select_rows((book_id,))
+        parent = parent or gui
+        if not gui.library_view.select_rows((book_id,)):
+            if gprefs['fts_library_restrict_books']:
+                error_dialog(parent, _('Not found'), _('This book was not found in the calibre library'), show=True)
+            else:
+                error_dialog(parent, _('Not found'), _(
+                    'This book is not currently visible in the calibre library.'
+                    ' If you have a search or Virtual library active, try clearing that.'
+                    ' Or click the "Restrict searched books" checkbox in this window to'
+                    ' only search currently visible books.'), show=True)
 
 
 class SearchDelegate(ResultsDelegate):
@@ -418,7 +428,7 @@ class ResultsView(QTreeView):
         results, match = self.m.data_for_index(index)
         m = QMenu(self)
         if results:
-            m.addAction(QIcon.ic('lt.png'), _('Jump to this book in the library'), partial(jump_to_book, results.book_id))
+            m.addAction(QIcon.ic('lt.png'), _('Jump to this book in the library'), partial(jump_to_book, results.book_id, self))
             m.addAction(QIcon.ic('marked.png'), _('Mark this book in the library'), partial(mark_books, results.book_id))
         m.addSeparator()
         m.addAction(QIcon.ic('plus.png'), _('Expand all'), self.expandAll)
@@ -490,7 +500,8 @@ class SearchInputPanel(QWidget):
         self.related = rw = QCheckBox(_('&Match on related words'))
         rw.setToolTip('<p>' + _(
             'With this option searching for words will also match on any related words (supported in several languages). For'
-            ' example, in the English language: <i>correction</i> matches <i>correcting</i> and <i>corrected</i> as well'))
+            ' example, in the English language: {0} matches {1} and {2} as well').format(
+            '<i>correction</i>', '<i>correcting</i>', '<i>corrected</i>'))
         rw.setChecked(gprefs['fts_library_use_stemmer'])
         rw.stateChanged.connect(lambda state: gprefs.set('fts_library_use_stemmer', state != Qt.CheckState.Unchecked.value))
         self.summary = s = QLabel(self)
@@ -696,11 +707,12 @@ class DetailsPanel(QStackedWidget):
         hp.setDefaultStyleSheet('a { text-decoration: none; }')
         hp.setHtml('''
 <style>
+.wrapper { margin-left: 4px }
 div { margin-top: 0.5ex }
 .h { font-weight: bold; }
 .bq { margin-left: 1em; margin-top: 0.5ex; margin-bottom: 0.5ex; font-style: italic }
 p { margin: 0; }
-</style>
+</style><div class="wrapper">
                    ''' + _('''
 <div class="h">Search for single words</div>
 <p>Simply type the word:</p>
@@ -718,7 +730,7 @@ p { margin: 0; }
 <p>Here, 30 is the most words allowed between near groups. Defaults to 10 when unspecified.</p>
 
 <div style="margin-top: 1em"><a href="{fts_url}">Full syntax reference</a></div>
-''').format(fts_url=fts_url))
+''' + '</div>').format(fts_url=fts_url))
         hp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         hp.document().setDocumentMargin(0)
         hp.anchor_clicked.connect(safe_open_url)
@@ -829,6 +841,9 @@ class ResultsPanel(QWidget):
         m = QMenu(b)
         m.addAction(QIcon.ic('marked.png'), _('Mark all matched books in the library'), partial(self.mark_books, 'mark'))
         m.addAction(QIcon.ic('edit-select-all.png'), _('Select all matched books in the library'), partial(self.mark_books, 'select'))
+        if not hasattr(self, 'colored_pin'):
+            self.colored_pin = QIcon(render_pin())
+        m.addAction(QIcon(self.colored_pin), _('Mark and select all matched books'), partial(self.mark_books, 'mark-select'))
         b.setMenu(m)
 
     def mark_books(self, which):
@@ -838,6 +853,9 @@ class ResultsPanel(QWidget):
             if which == 'mark':
                 gui.iactions['Mark Books'].add_ids(book_ids)
             elif which == 'select':
+                gui.library_view.select_rows(book_ids)
+            elif which == 'mark-select':
+                gui.iactions['Mark Books'].add_ids(book_ids)
                 gui.library_view.select_rows(book_ids)
 
     def clear_results(self):

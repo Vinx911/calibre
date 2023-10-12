@@ -111,6 +111,7 @@ def fix_palette_colors(p):
     if iswindows:
         # On Windows the highlighted colors for inactive widgets are the
         # same as non highlighted colors. This is a regression from Qt 4.
+        # Possibly fixed in Qt 6.5 need to test
         # https://bugreports.qt-project.org/browse/QTBUG-41060
         for role in (QPalette.ColorRole.Highlight, QPalette.ColorRole.HighlightedText, QPalette.ColorRole.Base, QPalette.ColorRole.AlternateBase):
             p.setColor(QPalette.ColorGroup.Inactive, role, p.color(QPalette.ColorGroup.Active, role))
@@ -376,6 +377,39 @@ class PaletteManager(QObject):
             ss = 'QTabBar::tab:selected { font-style: italic }\n\n'
             if self.is_dark_theme:
                 ss += 'QMenu { border: 1px solid palette(shadow); }'
+                ss += '''
+QTabBar::tab:selected {
+    background-color: palette(base);
+    border: 1px solid gray;
+    padding: 2px 8px;
+    margin-left: -4px;
+    margin-right: -4px;
+}
+
+QTabBar::tab:top:selected {
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    border-bottom-width: 0;
+}
+
+QTabBar::tab:bottom:selected {
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
+    border-top-width: 0;
+}
+
+QTabBar::tab:first:selected {
+    margin-left: 0; /* the first selected tab has nothing to overlap with on the left */
+}
+
+QTabBar::tab:last:selected {
+    margin-right: 0; /* the last selected tab has nothing to overlap with on the right */
+}
+
+QTabBar::tab:only-one {
+    margin: 0; /* if there is only one tab, we don't want overlapping margins */
+}
+'''
             app.setStyleSheet(ss)
         app.palette_changed.emit()
 
@@ -445,3 +479,19 @@ class PaletteManager(QObject):
                         print('Detected a spontaneous palette change by Qt, reverting it', file=sys.stderr)
                     self.set_palette(pal)
             self.on_palette_change()
+
+    def tree_view_hover_style(self):
+        g1, g2 = '#e7effd', '#cbdaf1'
+        border_size = '1px'
+        if self.is_dark_theme:
+            c = QApplication.instance().palette().color(QPalette.ColorRole.Highlight)
+            c = c.lighter(180)
+            g1 = g2 = c.name()
+            border_size = '0px'
+        return f'''
+            QTreeView::item:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 {g1}, stop: 1 {g2});
+                border: {border_size} solid #bfcde4;
+                border-radius: 6px;
+            }}
+        '''

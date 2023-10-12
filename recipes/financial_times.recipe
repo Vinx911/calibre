@@ -1,7 +1,9 @@
 import json
 import re
+from urllib.parse import quote
+from html5_parser import parse
 
-from calibre.web.feeds.news import BasicNewsRecipe
+from calibre.web.feeds.news import BasicNewsRecipe, classes
 
 
 class ft(BasicNewsRecipe):
@@ -9,23 +11,78 @@ class ft(BasicNewsRecipe):
     language = 'en'
     __author__ = "Kovid Goyal"
     description = 'The Financial Times is one of the world’s leading news organisations, recognised internationally for its authority, integrity and accuracy.'
-    oldest_article = 1.5
+    oldest_article = 1.15
     max_articles_per_feed = 50
     no_stylesheets = True
     remove_javascript = True
     remove_empty_feeds = True
     ignore_duplicate_articles = {'url'}
+    resolve_internal_links = True
     remove_attributes = ['style', 'width', 'height']
     masthead_url = 'https://im.ft-static.com/m/img/masthead_main.jpg'
 
+    extra_css = '''
+        .article-info__time-byline {font-size:small; font-weight:bold; }
+        .o-topper__visual, #fig, .main-image, .n-content-image { text-align:center; font-size:small; }
+        blockquote, i { color:#5c5c5c; }
+        .o-topper__standfirst { font-weight:bold; color:#202020; }
+        .o-topper__topic { font-size:small; color:#5c5c5c; }
+    '''
+
+    keep_only_tags = [
+        classes(
+            'body_json o-topper__topic o-topper__headline o-topper__standfirst o-topper__visual article-info__time-byline main-image'
+        ),
+        dict(name='article', attrs={'id':'article-body'})
+    ]
+
+    remove_tags = [
+        dict(name='aside', attrs={'class':'n-content-recommended--single-story'}),
+        classes('in-article-advert')
+    ]
+
+    # needs_subscription = 'optional'
+    #
+    # def get_browser(self, *args, **kw):
+    #     br = super().get_browser(*args, **kw)
+    #     if self.username and self.password:
+    #         # ft.com uses a CAPTCHA on its login page so this sadly doesnt work
+    #         br.open('https://accounts.ft.com/login?location=https%3A%2F%2Fwww.ft.com')
+    #         br.select_form(id='email-form')
+    #         br['email'] = self.username
+    #         br.submit()
+    #         br.select_form(id='login-form')
+    #         br['password'] = self.password
+    #         br.submit()
+    #     return br
+
+    def get_browser(self, *args, **kw):
+        br = super().get_browser(*args, **kw)
+        br.set_current_header('Referer',  'https://www.google.com/')
+        return br
+
+    # the print_version loads all articles but sometimes it might fail due to too many requests
+    # def print_version(self, url):
+    #     return 'https://webcache.googleusercontent.com/search?q=cache:' + quote(url, safe='')
+
     def get_cover_url(self):
-        soup = self.index_to_soup(
-            'https://www.todayspapers.co.uk/the-financial-times-front-page-today/'
-        )
-        tag = soup.find('div', attrs={'class': 'elementor-image'})
-        if tag:
-            self.cover_url = tag.find('img')['src']
-        return getattr(self, 'cover_url', self.cover_url)
+        from datetime import date
+        cover = 'http://img.kiosko.net/' + str(
+            date.today().year
+        ) + '/' + date.today().strftime('%m') + '/' + date.today(
+        ).strftime('%d') + '/uk/ft_uk.750.jpg'
+        br = BasicNewsRecipe.get_browser(self, verify_ssl_certificates=False)
+        try:
+            br.open(cover)
+        except:
+            index = 'https://en.kiosko.net/uk/np/ft_uk.html'
+            soup = self.index_to_soup(index)
+            for image in soup.findAll('img', src=True):
+                if image['src'].endswith('750.jpg'):
+                    return image['src']
+            self.log("\nCover unavailable")
+            cover = None
+        return cover
 
     feeds = [
         ('World', 'https://www.ft.com/world?format=rss'),
@@ -42,6 +99,11 @@ class ft(BasicNewsRecipe):
     def preprocess_raw_html(self, raw, *a):
         # with open('/t/raw.html', 'w') as f:
         #     f.write(raw)
+        root = parse(raw)
+        if root.xpath('//article[@id="article-body"]'):
+            self.log('**has article content')
+            return raw
+        self.log('**no article content')
         m = re.search(r'type="application/ld\+json">[^<]+?"@type":"NewsArticle"', raw)
         raw = raw[m.start():]
         raw = raw.split('>', 1)[1]
@@ -58,19 +120,35 @@ class ft(BasicNewsRecipe):
             except TypeError:
                 author = ' and '.join(x['name'] for x in data['author'])
         image = desc = title_image_url = ''
-        if data.get('image'):
-            title_image_url = data['image']['url']
-            image = '<p><img src="{}">'.format(title_image_url)
 
+        def resize_img(img):
+            a = 'https://www.ft.com/__origami/service/image/v2/images/raw/'
+            b = quote(img, safe='')
+            c = '?dpr=2&fit=scale-down&quality=medium&source=next&width=400'
+            # use width = 200, 300, 400,.. 700...
+            return a + b + c
+
+        if data.get('image'):
+            image_url = data['image']['url']
+            if body.__contains__(image_url) is False:
+                title_image_url = resize_img(image_url)
+                image = '<p><img src="{}">'.format(title_image_url)
         # embedded image links
+
         def insert_image(m):
             url = m.group()[1:-1]
-            if url == title_image_url:
-                return ''
-            return '<p><img src="{}">'.format(url)
+            if url.__contains__('studio') is False:
+                url = resize_img(url)
+            return '<span><img src="{}"></span></p><p>'.format(url)
 
         body = re.sub(r'\[https://\S+?\]', insert_image, body)
         if data.get('description'):
             desc = '<h2>' + data['description'] + '</h2>'
-        html = '<html><body><h1>' + title + '</h1>' + desc + '<h3>' + author + '</h3>' + image + '<p>' + body
+        html = '<html><body><div class="body_json"><h1>' + title + '</h1>' + desc + '<h3>' + author + '</h3>' + image + '<p>' + body
         return html
+
+    def preprocess_html(self, soup):
+        for con in soup.findAll(attrs={'class':'n-content-layout__slot'}):
+            if con.find('figure'):
+                con['id'] = 'fig'
+        return soup

@@ -4,12 +4,14 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 import json
+import sys
 import os
 import re
 import time
 from collections import namedtuple
 from contextlib import contextmanager
 from threading import Lock
+from functools import partial
 
 try:
     from urllib.parse import parse_qs, quote_plus, unquote, urlencode, quote, urlparse
@@ -19,7 +21,7 @@ except ImportError:
 
 from lxml import etree
 
-from calibre import browser as _browser, prints, random_user_agent
+from calibre import browser as _browser, prints as safe_print, random_user_agent
 from calibre.constants import cache_dir
 from calibre.ebooks.chardet import xml_to_unicode
 from calibre.utils.lock import ExclusiveFile
@@ -29,6 +31,7 @@ current_version = (1, 2, 2)
 minimum_calibre_version = (2, 80, 0)
 webcache = {}
 webcache_lock = Lock()
+prints = partial(safe_print, file=sys.stderr)
 
 
 Result = namedtuple('Result', 'url title cached_url')
@@ -140,7 +143,10 @@ def wayback_machine_cached_url(url, br=None, log=prints, timeout=60):
     try:
         closest = data['archived_snapshots']['closest']
         if closest['available']:
-            return closest['url'].replace('http:', 'https:')
+            ans = closest['url'].replace('http:', 'https:', 1)
+            # get unmodified HTML
+            ans = ans.replace(closest['timestamp'], closest['timestamp'] + 'id_', 1)
+            return ans
     except Exception:
         pass
     from pprint import pformat

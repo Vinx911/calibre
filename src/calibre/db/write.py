@@ -6,16 +6,17 @@ __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 import re
-from functools import partial
 from datetime import datetime
-from polyglot.builtins import iteritems, itervalues
+from functools import partial
 
 from calibre.constants import preferred_encoding
 from calibre.ebooks.metadata import author_to_author_sort, title_sort
 from calibre.utils.date import (
-    parse_only_date, parse_date, UNDEFINED_DATE, isoformat, is_date_undefined)
+    UNDEFINED_DATE, is_date_undefined, isoformat, parse_date, parse_only_date,
+)
+from calibre.utils.icu import lower as icu_lower, strcmp
 from calibre.utils.localization import canonicalize_lang
-from calibre.utils.icu import strcmp
+from polyglot.builtins import iteritems, itervalues
 
 missing = object()
 
@@ -164,11 +165,13 @@ def get_adapter(name, metadata):
     elif dt == 'comments':
         ans = single_text
     elif dt == 'rating':
-        ans = lambda x: None if x in {None, 0} else min(10, max(0, adapt_number(int, x)))
+        def ans(x):
+            return (None if x in {None, 0} else min(10, max(0, adapt_number(int, x))))
     elif dt == 'enumeration':
         ans = single_text
     elif dt == 'composite':
-        ans = lambda x: x
+        def ans(x):
+            return x
 
     if name == 'title':
         return lambda x: ans(x) or _('Unknown')
@@ -292,7 +295,8 @@ def get_db_id(val, db, m, table, kmap, rid_map, allow_case_change,
         table.col_book_map[item_id] = set()
         if is_authors:
             table.asort_map[item_id] = aus
-            table.alink_map[item_id] = ''
+        if hasattr(table, 'link_map'):
+            table.link_map[item_id] = ''
     elif allow_case_change and val != table.id_map[item_id]:
         case_changes[item_id] = val
     val_map[val] = item_id
@@ -488,7 +492,8 @@ def many_many(book_id_val_map, db, field, allow_case_change, *args):
             table.col_book_map.pop(item_id, None)
             if is_authors:
                 table.asort_map.pop(item_id, None)
-                table.alink_map.pop(item_id, None)
+            if hasattr(table, 'link_map'):
+                table.link_map.pop(item_id, None)
 
     return dirtied
 

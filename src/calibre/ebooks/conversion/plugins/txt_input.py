@@ -21,7 +21,7 @@ MD_EXTENSIONS = {
     'meta': _('Metadata in the document'),
     'nl2br': _('Treat newlines as hard breaks'),
     'sane_lists': _('Do not allow mixing list types'),
-    'smarty': _('Use markdown\'s internal smartypants parser'),
+    'smarty': _('Use Markdown\'s internal smartypants parser'),
     'tables': _('Support tables'),
     'toc': _('Generate a table of contents'),
     'wikilinks': _('Wiki style links'),
@@ -49,7 +49,7 @@ class TXTInput(InputFormatPlugin):
             'auto': _('Automatically decide which formatting processor to use'),
             'plain': _('No formatting'),
             'heuristic': _('Use heuristics to determine chapter headings, italics, etc.'),
-            'textile': _('Use the TexTile markup language'),
+            'textile': _('Use the Textile markup language'),
             'markdown': _('Use the Markdown markup language')
         },
     }
@@ -107,12 +107,13 @@ class TXTInput(InputFormatPlugin):
         from html5_parser import parse
         root = parse(html)
         changed = False
+        base_dir = os.path.normcase(os.path.abspath(base_dir)) + os.sep
         for img in root.xpath('//img[@src]'):
             src = img.get('src')
             prefix = src.split(':', 1)[0].lower()
             if src and prefix not in ('file', 'http', 'https', 'ftp') and not os.path.isabs(src):
                 src = os.path.join(base_dir, src)
-                if os.path.isfile(src) and os.access(src, os.R_OK):
+                if os.path.normcase(src).startswith(base_dir) and os.path.isfile(src) and os.access(src, os.R_OK):
                     with open(src, 'rb') as f:
                         data = f.read()
                     f = self.shift_file(os.path.basename(src), data)

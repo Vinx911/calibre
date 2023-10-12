@@ -110,12 +110,19 @@ def event_has_mods(self, event=None):
 
 def mousePressEvent(self, event):
     ep = event.pos()
-    if self.indexAt(ep) in self.selectionModel().selectedIndexes() and \
-            event.button() == Qt.MouseButton.LeftButton and not self.event_has_mods():
+    # for performance, check the selection only once we know we need it
+    if event.button() == Qt.MouseButton.LeftButton and not self.event_has_mods() \
+                and self.indexAt(ep) in self.selectionModel().selectedIndexes():
         self.drag_start_pos = ep
     if hasattr(self, 'handle_mouse_press_event'):
         return self.handle_mouse_press_event(event)
     return qt_item_view_base_class(self).mousePressEvent(self, event)
+
+
+def mouseReleaseEvent(self, event):
+    if hasattr(self, 'handle_mouse_release_event'):
+        return self.handle_mouse_release_event(event)
+    return qt_item_view_base_class(self).mouseReleaseEvent(self, event)
 
 
 def drag_icon(self, cover, multiple):
@@ -262,7 +269,7 @@ def setup_dnd_interface(cls_or_self):
         cls = cls_or_self
         fmap = globals()
         for x in (
-            'dragMoveEvent', 'event_has_mods', 'mousePressEvent', 'mouseMoveEvent',
+            'dragMoveEvent', 'event_has_mods', 'mousePressEvent', 'mouseMoveEvent', 'mouseReleaseEvent',
             'drag_data', 'drag_icon', 'dragEnterEvent', 'dropEvent', 'paths_from_event'):
             func = fmap[x]
             setattr(cls, x, func)

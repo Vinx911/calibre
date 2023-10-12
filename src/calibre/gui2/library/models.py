@@ -5,40 +5,42 @@ __license__   = 'GPL v3'
 __copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import errno
 import functools
 import numbers
 import os
 import re
+import sys
 import time
 import traceback
 from collections import defaultdict, namedtuple
 from itertools import groupby
+from qt.core import (
+    QAbstractTableModel, QApplication, QColor, QDateTime, QFont, QFontMetrics, QIcon,
+    QImage, QModelIndex, QPainter, QPixmap, Qt, pyqtSignal,
+)
 
 from calibre import (
-    fit_image, force_unicode, human_readable, isbytestring, prepare_string_for_xml,
-    strftime
+    fit_image, human_readable, isbytestring, prepare_string_for_xml, strftime,
 )
 from calibre.constants import DEBUG, config_dir, dark_link_color, filesystem_encoding
 from calibre.db.search import CONTAINS_MATCH, EQUALS_MATCH, REGEXP_MATCH, _match
+from calibre.db.utils import force_to_bool
 from calibre.ebooks.metadata import authors_to_string, fmt_sidx, string_to_authors
 from calibre.ebooks.metadata.book.formatter import SafeFormat
-from calibre.gui2 import error_dialog
+from calibre.gui2 import error_dialog, simple_excepthook
 from calibre.gui2.library import DEFAULT_SORT
-from calibre.library.caches import force_to_bool
 from calibre.library.coloring import color_row_key
 from calibre.library.save_to_disk import find_plugboard
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.config import device_prefs, prefs, tweaks
-from calibre.utils.date import (UNDEFINED_DATE, as_local_time, dt_factory,
-                                is_date_undefined, qt_to_dt)
+from calibre.utils.date import (
+    UNDEFINED_DATE, as_local_time, dt_factory, is_date_undefined, qt_to_dt,
+)
 from calibre.utils.icu import sort_key
-from calibre.utils.localization import calibre_langcode_to_name
+from calibre.utils.localization import calibre_langcode_to_name, ngettext
+from calibre.utils.resources import get_path as P
 from calibre.utils.search_query_parser import ParseException, SearchQueryParser
 from polyglot.builtins import iteritems, itervalues, string_or_bytes
-from qt.core import (QAbstractTableModel, QApplication, QColor, QDateTime,
-                     QFont, QFontMetrics, QIcon, QImage, QModelIndex, QPainter,
-                     QPixmap, Qt, pyqtSignal)
 
 Counts = namedtuple('Counts', 'library_total total current')
 
@@ -202,8 +204,10 @@ class BooksModel(QAbstractTableModel):  # {{{
                         'series'    : ngettext("Series", 'Series', 1),
                         'last_modified' : _('Modified'),
                         'languages' : _('Languages'),
+                        'formats'   : _('Formats'),
+                        'id'        : _('Id'),
+                        'path'      : _('Path'),
         }
-
         self.db = None
 
         self.formatter = SafeFormat()
@@ -400,6 +404,8 @@ class BooksModel(QAbstractTableModel):  # {{{
     def refresh_rows(self, rows, current_row=-1):
         self._clear_caches()
         cc = self.columnCount(QModelIndex()) - 1
+        for r in rows:
+            self.db.new_api.clear_extra_files_cache(self.db.id(r))
         for first_row, last_row in group_numbers(rows):
             self.dataChanged.emit(self.index(first_row, 0), self.index(last_row, cc))
             if current_row >= 0 and first_row <= current_row <= last_row:
@@ -580,6 +586,11 @@ class BooksModel(QAbstractTableModel):  # {{{
         if not self.db:
             return
         self.db.multisort(self.sort_history[:tweaks['maximum_resort_levels']])
+        if self.sort_history:
+            # There are ways to get here that don't set sorted_on, e.g., the
+            # sort_by action. I don't think sort_history can be empty, but it
+            # doesn't hurt to check
+            self.sorted_on = self.sort_history[0]
         if reset:
             self.beginResetModel(), self.endResetModel()
 
@@ -621,11 +632,19 @@ class BooksModel(QAbstractTableModel):  # {{{
         if current.isValid():
             idx = current.row()
             try:
-                data = self.get_book_display_info(idx)
+                self.db.id(idx)
             except Exception:
-                import traceback
-                error_dialog(None, _('Unhandled error'), _(
-                    'Failed to read book data from calibre library. Click "Show details" for more information'), det_msg=traceback.format_exc(), show=True)
+                # can happen if an out of band search is done causing the index
+                # to no longer be valid since this function is now called after
+                # an event loop tick.
+                return
+            try:
+                data = self.get_book_display_info(idx)
+            except Exception as e:
+                if sys.excepthook is simple_excepthook or sys.excepthook is sys.__excepthook__:
+                    return  # ignore failures during startup/shutdown
+                e.locking_violation_msg = _('Failed to read cover file for this book from the calibre library.')
+                raise
             else:
                 if emit_signal:
                     self.new_bookdisplay_data.emit(data)
@@ -680,13 +699,15 @@ class BooksModel(QAbstractTableModel):  # {{{
         else:
             return metadata
 
-    def get_preferred_formats_from_ids(self, ids, formats,
-                              set_metadata=False, specific_format=None,
-                              exclude_auto=False, mode='r+b',
-                              use_plugboard=None, plugboard_formats=None):
+    def get_preferred_formats_from_ids(
+        self, ids, formats,
+        set_metadata=False, specific_format=None, exclude_auto=False, mode='r+b',
+        use_plugboard=None, plugboard_formats=None, modified_metadata=None,
+    ):
         from calibre.ebooks.metadata.meta import set_metadata as _set_metadata
         ans = []
         need_auto = []
+        modified_metadata = [] if modified_metadata is None else modified_metadata
         if specific_format is not None:
             formats = [specific_format.lower()]
         for id in ids:
@@ -705,12 +726,12 @@ class BooksModel(QAbstractTableModel):  # {{{
                 pt = PersistentTemporaryFile(suffix='caltmpfmt.'+format)
                 self.db.copy_format_to(id, format, pt, index_is_id=True)
                 pt.seek(0)
+                newmi = None
                 if set_metadata:
                     try:
                         mi = self.db.get_metadata(id, get_cover=True,
                                                   index_is_id=True,
                                                   cover_as_data=True)
-                        newmi = None
                         if use_plugboard and format.lower() in plugboard_formats:
                             plugboards = self.db.new_api.pref('plugboards', {})
                             cpb = find_plugboard(use_plugboard, format.lower(),
@@ -731,10 +752,12 @@ class BooksModel(QAbstractTableModel):  # {{{
                         x = x.decode(filesystem_encoding)
                     return x
                 ans.append(to_uni(os.path.abspath(pt.name)))
+                modified_metadata.append(newmi)
             else:
                 need_auto.append(id)
                 if not exclude_auto:
                     ans.append(None)
+                    modified_metadata.append(None)
         return ans, need_auto
 
     def get_preferred_formats(self, rows, formats, paths=False,
@@ -810,6 +833,10 @@ class BooksModel(QAbstractTableModel):  # {{{
 
         def renderer(field, decorator=False):
             idfunc = self.db.id
+            if field == 'id':
+                def func(idx):
+                    return idfunc(idx)
+                return func
             fffunc = self.db.new_api.fast_field_for
             field_obj = self.db.new_api.fields[field]
             m = field_obj.metadata.copy()
@@ -927,14 +954,14 @@ class BooksModel(QAbstractTableModel):  # {{{
                         return (None if v is None else (_('Yes') if v else _('No')))
                 else:
                     def func(idx):
-                        return(None)
+                        return None
             else:
                 def func(idx):
                     return None
 
             return func
 
-        self.dc = {f:renderer(f) for f in 'title authors size timestamp pubdate last_modified rating publisher tags series ondevice languages'.split()}
+        self.dc = {f:renderer(f) for f in self.orig_headers.keys()}
         self.dc_decorator = {f:renderer(f, True) for f in ('ondevice',)}
 
         for col in self.custom_columns:
@@ -1230,13 +1257,10 @@ class BooksModel(QAbstractTableModel):  # {{{
                 return self._set_data(index, value)
             except OSError as err:
                 import traceback
-                if getattr(err, 'errno', None) == errno.EACCES:  # Permission denied
-                    fname = getattr(err, 'filename', None)
-                    p = 'Locked file: %s\n\n'%force_unicode(fname if fname else '')
-                    error_dialog(get_gui(), _('Permission denied'),
-                            _('Could not change the on disk location of this'
-                                ' book. Is it open in another program?'),
-                            det_msg=p+force_unicode(traceback.format_exc()), show=True)
+                traceback.print_exc()
+                det_msg = traceback.format_exc()
+                gui = get_gui()
+                if gui.show_possible_sharing_violation(err, det_msg):
                     return False
                 error_dialog(get_gui(), _('Failed to set data'),
                         _('Could not set data, click "Show details" to see why.'),
@@ -1569,6 +1593,8 @@ class DeviceBooksModel(BooksModel):  # {{{
         self.search(self.last_search, reset)
 
     def sort(self, col, order, reset=True):
+        if not isinstance(order, Qt.SortOrder):
+            order = Qt.SortOrder.AscendingOrder if order else Qt.SortOrder.DescendingOrder
         descending = order != Qt.SortOrder.AscendingOrder
         cname = self.column_map[col]
 
@@ -1588,7 +1614,7 @@ class DeviceBooksModel(BooksModel):  # {{{
                 return ax
 
         keygen = {
-                'title': ('title_sorter', lambda x: sort_key(x) if x else ''),
+                'title': ('title_sorter', lambda x: sort_key(x) if x else b''),
                 'authors' : author_key,
                 'size' : ('size', int),
                 'timestamp': ('datetime', functools.partial(dt_factory, assume_utc=True)),
@@ -1688,6 +1714,10 @@ class DeviceBooksModel(BooksModel):  # {{{
         if current.isValid():
             idx = current.row()
             try:
+                self.db[self.map[idx]]
+            except Exception:
+                return  # can happen if the device is ejected
+            try:
                 data = self.get_book_display_info(idx)
             except Exception:
                 import traceback
@@ -1701,6 +1731,13 @@ class DeviceBooksModel(BooksModel):  # {{{
 
     def paths(self, rows):
         return [self.db[self.map[r.row()]].path for r in rows]
+
+    def id(self, row):
+        row = getattr(row, 'row', lambda:row)()
+        try:
+            return self.db[self.map[row]].path
+        except Exception:
+            return None
 
     def paths_for_db_ids(self, db_ids, as_map=False):
         res = defaultdict(list) if as_map else []

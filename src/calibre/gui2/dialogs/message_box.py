@@ -9,11 +9,12 @@ import sys
 from qt.core import (
     QAction, QApplication, QCheckBox, QDialog, QDialogButtonBox, QGridLayout, QIcon,
     QKeySequence, QLabel, QPainter, QPlainTextEdit, QSize, QSizePolicy, Qt,
-    QTextBrowser, QTextDocument, QVBoxLayout, QWidget, pyqtSignal
+    QTextBrowser, QTextDocument, QVBoxLayout, QWidget, pyqtSignal,
 )
 
 from calibre.constants import __version__, isfrozen
 from calibre.gui2 import gprefs
+from calibre.utils.localization import ngettext
 
 
 class Icon(QWidget):
@@ -227,22 +228,22 @@ class ViewLog(QDialog):  # {{{
 
         self.unique_name = unique_name or 'view-log-dialog'
         self.finished.connect(self.dialog_closing)
-        self.resize(QSize(700, 500))
-        geom = gprefs.get(self.unique_name, None)
-        if geom is not None:
-            QApplication.instance().safe_restore_geometry(self, geom)
+        self.restore_geometry(gprefs, self.unique_name)
 
         self.setModal(False)
         self.setWindowTitle(title)
         self.setWindowIcon(QIcon.ic('debug.png'))
         self.show()
 
+    def sizeHint(self):
+        return QSize(700, 500)
+
     def copy_to_clipboard(self):
         txt = self.tb.toPlainText()
         QApplication.clipboard().setText(txt)
 
     def dialog_closing(self, result):
-        gprefs[self.unique_name] = bytearray(self.saveGeometry())
+        self.save_geometry(gprefs, self.unique_name)
 # }}}
 
 
@@ -491,8 +492,8 @@ class JobError(QDialog):  # {{{
 
 
 if __name__ == '__main__':
-    from calibre.gui2 import Application, question_dialog
     from calibre import prepare_string_for_xml
+    from calibre.gui2 import Application, question_dialog
     app = Application([])
     merged = {'Kovid Goyal': ['Waterloo', 'Doomed'], 'Someone Else': ['Some other book ' * 1000]}
     lines = []

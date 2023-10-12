@@ -57,7 +57,9 @@ Add books
 
     6. **Add files to selected book records**: Allows you to add or update the files associated with an existing book in your library.
 
-    7. **Add an empty file to selected book records**: Allows you to add an empty file of the specified format to the selected book records.
+    7. **Add data files to selected book records**: Allows you to add any number of extra files that will be stored in a :file:`data` sub-directory in the book directory. See :ref:`data_files` for details.
+
+    8. **Add an empty file to selected book records**: Allows you to add an empty file of the specified format to the selected book records.
 
 The :guilabel:`Add books` action can read metadata from a wide variety of e-book formats. In addition, it tries to guess metadata from the filename.
 See the :ref:`config_filename_metadata` section, to learn how to configure this.
@@ -83,6 +85,7 @@ Edit metadata
     2. **Edit metadata in bulk**: Allows you to edit common metadata fields for large numbers of books simultaneously. It operates on all the books you have selected in the :ref:`Library view <search_sort>`.
     3. **Download metadata and covers**: Downloads metadata and covers (if available) for the books that are selected in the book list.
     4. **Merge book records**: Gives you the capability of merging the metadata and formats of two or more book records. You can choose to either delete or keep the records that were not clicked first.
+    5. **Manage data files**: Manage the extra data files associated with the selected books.
 
 For more details, see :ref:`metadata`.
 
@@ -270,8 +273,10 @@ Remove books
 
     6. **Remove matching books from device**: Allows you to remove e-book files from a connected device that match the books that are selected in the book list.
 
+    7. **Restore recently deleted**: Allows you to undo the removal of books or formats.
+
 .. note::
-    Note that when you use :guilabel:`Remove books` to delete books from your calibre library, the book record is permanently deleted, but the files are placed into the :guilabel:`Recycle Bin/Trash`. This allows you to recover the files if you change your mind.
+    Note that when you use :guilabel:`Remove books` to delete books from your calibre library, the book record is deleted, but the books are temporarily stored, for a few days, in a trash folder. You can undo the delete by right clicking the :guilabel:`Remove books` button and choosing to :guilabel:`Restore recently deleted` books.
 
 .. _configuration:
 
@@ -311,7 +316,10 @@ Search & sort
 
 The Search & Sort section allows you to perform several powerful actions on your book collections.
 
-    * You can sort them by title, author, date, rating, etc. by clicking on the column titles. You can also sub-sort, i.e. sort on multiple columns. For example, if you click on the title column and then the author column, the book will be sorted by author and then all the entries for the same author will be sorted by title.
+    * You can sort them by title, author, date, rating, etc. by clicking on the column titles.
+      You can also sub-sort, i.e. sort on multiple columns.
+      For example, if you click on the title column and then the author column, the book will be sorted by
+      author and then all the entries for the same author will be sorted by title.
 
     * You can search for a particular book or set of books using the Search bar. More on that below.
 
@@ -324,6 +332,9 @@ The Search & Sort section allows you to perform several powerful actions on your
         - Keep the :kbd:`Shift` key pressed and click on the starting and ending book of a range of books you want selected.
 
     * You can configure which fields you want displayed by using the :ref:`configuration` dialog.
+
+    * To perform complex multiple column based sub-sorting add the :guilabel:`Sort by`
+      tool to a toolbar via :guilabel:`Preferences->Toolbars & menus`.
 
 .. _search_interface:
 
@@ -386,7 +397,7 @@ Two variants of equality searches are used for hierarchical items (e.g., A.B.C):
 
 *'Regular expression' searches*
 
-Regular expression searches are indicated by prefixing the search string with a tilde (~). Any `Python-compatible regular expression <https://docs.python.org/library/re.html>`__ can be used. Backslashes used to escape special characters in regular expressions must be doubled because single backslashes will be removed during query parsing. For example, to match a literal parenthesis you must enter ``\\(`` or alternatively use `super quotes` (see below). Regular expression searches are 'contains' searches unless the expression is anchored. Character variants are significant: ``~e`` doesn't match ``é``.
+Regular expression searches are indicated by prefixing the search string with a tilde (~). Any `Python-compatible regular expression <https://docs.python.org/library/re.html>`__ can be used. Backslashes used to escape special characters in regular expressions must be doubled because single backslashes will be removed during query parsing. For example, to match a literal parenthesis you must enter ``\\(`` or alternatively use `super-quotes` (see below). Regular expression searches are 'contains' searches unless the expression is anchored. Character variants are significant: ``~e`` doesn't match ``é``.
 
 *'Character variant' searches*
 
@@ -489,11 +500,11 @@ search. More about saving searches below.
 
 *Virtual libraries*
 
-The special field ``vl`` is used to search for books in a virtual library. For
-example, ``vl:Read`` will find all the books in the *Read* virtual library. The search
+The special field ``vl`` is used to search for books in a Virtual library. For
+example, ``vl:Read`` will find all the books in the *Read* Virtual library. The search
 ``vl:Read and vl:"Science Fiction"`` will find all the books that are in both the *Read* and
 *Science Fiction* virtual libraries. The value following ``vl:`` must be the name of a
-virtual library. If the virtual library name contains spaces then surround it with quotes.
+Virtual library. If the Virtual library name contains spaces then surround it with quotes.
 
 *Whether a field has a value*
 
@@ -525,6 +536,20 @@ Identifiers (e.g., ISBN, DOI, LCCN, etc.) use an extended syntax. An identifier 
     * ``identifiers:=isbn:123`` will find books with a type equal to ISBN having a value containing `123`.
     * ``identifiers:=isbn:=123456789`` will find books with a type equal to ISBN having a value equal to `123456789`.
     * ``identifiers:i:1`` will find books with a type containing an `i` having a value containing a `1`.
+
+*Categories visible in the Tag browser*
+
+The search ``in_tag_browser:true`` finds all books that are in categories
+(tags, authors, etc.) currently shown in the :guilabel:`Tag browser`. This is
+useful if you set the two preferences :guilabel:`Preferences->Look & feel->Tag
+browser->Hide empty categories` and :guilabel:`Find shows all items that
+match`. With those two preferences set, doing a :guilabel:`Find` in the
+:guilabel:`Tag browser` shows only categories containing items matched by the
+:guilabel:`Find`. Then, the search ``in_tag_browser:true`` additionally finds books
+with these categories / items. You can easily run this search by pressing the
+key :kbd:`Ctrl+Alt+Shift+F` or clicking the configure button in the
+:guilabel:`Tag browser` and choosing the :guilabel:`Show only books that have
+visible categories` entry.
 
 *Search using templates*
 
@@ -902,3 +927,6 @@ calibre has several keyboard shortcuts to save you time and mouse movement. Thes
       - Quit calibre
     * - :kbd:`X`
       - Toggle auto scroll of the book list
+    * - :kbd:`Ctrl+Alt+Shift+F`
+      - Restrict the displayed books to only those books that are in a category
+        currently displayed in the :guilabel:`Tag browser`

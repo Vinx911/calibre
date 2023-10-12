@@ -14,6 +14,7 @@ defaults = {
     'show_all_metadata': False, # show all metadata fields in the book details panel
     'sort': 'timestamp.desc',  # comma separated list of items of the form: field.order
     'view_mode': 'cover_grid',
+    'fts_related_words': True,
 
     # Tag Browser settings
     'and_search_terms': False,  # how to add search terms to the search expression from the Tag Browser
@@ -52,7 +53,7 @@ defaults = {
     'override_book_colors': 'never',
     'paged_margin_clicks_scroll_by_screen': True,
     'paged_wheel_scrolls_by_screen': False,
-    'paged_taps_scroll_by_screen': False,
+    'paged_wheel_section_jumps': True,
     'paged_pixel_scroll_threshold': 60,
     'read_mode': 'paged',
     'scroll_auto_boundary_delay': 5,
@@ -77,6 +78,7 @@ defaults = {
     'book_search_mode': 'contains',
     'book_search_case_sensitive': False,
     'reverse_page_turn_zones': False,
+    'gesture_overrides': {},
 }
 
 is_local_setting = {

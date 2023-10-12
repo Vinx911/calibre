@@ -149,7 +149,7 @@ class ImageView(QDialog):
         self.save_button = so = bb.addButton(_('&Save as'), QDialogButtonBox.ButtonRole.ActionRole)
         self.copy_button = co = bb.addButton(_('&Copy'), QDialogButtonBox.ButtonRole.ActionRole)
         self.rotate_button = ro = bb.addButton(_('&Rotate'), QDialogButtonBox.ButtonRole.ActionRole)
-        self.fullscreen_button = fo = bb.addButton(_('&Full screen'), QDialogButtonBox.ButtonRole.ActionRole)
+        self.fullscreen_button = fo = bb.addButton(_('F&ull screen'), QDialogButtonBox.ButtonRole.ActionRole)
         zi.setIcon(QIcon.ic('plus.png'))
         zo.setIcon(QIcon.ic('minus.png'))
         so.setIcon(QIcon.ic('save.png'))
@@ -179,9 +179,7 @@ class ImageView(QDialog):
         h.addWidget(i), h.addStretch(), h.addWidget(bb)
         if self.fit_image.isChecked():
             self.set_to_viewport_size()
-        geom = self.prefs.get(self.geom_name)
-        if geom is not None:
-            self.restoreGeometry(geom)
+        self.restore_geometry(self.prefs, self.geom_name)
         fo.setChecked(self.isFullScreen())
         fo.toggled.connect(self.toggle_fullscreen)
 
@@ -284,9 +282,7 @@ class ImageView(QDialog):
         self.label.setPixmap(self.current_img)
         self.label.adjustSize()
         self.resize(QSize(int(geom.width()/2.5), geom.height()-50))
-        geom = self.prefs.get(self.geom_name, None)
-        if geom is not None:
-            QApplication.instance().safe_restore_geometry(self, geom)
+        self.restore_geometry(self.prefs, self.geom_name)
         try:
             self.current_image_name = str(self.current_url.toString(NO_URL_FORMATTING)).rpartition('/')[-1]
         except AttributeError:
@@ -302,7 +298,7 @@ class ImageView(QDialog):
             self.show()
 
     def done(self, e):
-        self.prefs[self.geom_name] = bytearray(self.saveGeometry())
+        self.save_geometry(self.prefs, self.geom_name)
         return QDialog.done(self, e)
 
     def toggle_fullscreen(self):
@@ -340,14 +336,19 @@ class ImagePopup:
                 self.dialogs.remove(d)
 
 
-if __name__ == '__main__':
-    import sys
-
+def show_image(path=None):
+    if path is None:
+        import sys
+        path = sys.argv[-1]
     from calibre.gui2 import Application
     app = Application([])
     p = QPixmap()
-    p.load(sys.argv[-1])
-    u = QUrl.fromLocalFile(sys.argv[-1])
+    p.load(path)
+    u = QUrl.fromLocalFile(path)
     d = ImageView(None, p, u)
     d()
     app.exec()
+
+
+if __name__ == '__main__':
+    show_image()

@@ -10,7 +10,7 @@ technologyreview.com
 '''
 from calibre.web.feeds.news import BasicNewsRecipe, prefixed_classes
 from collections import OrderedDict
-
+import re
 
 def absurl(x):
     if x.startswith('//'):
@@ -43,6 +43,7 @@ class MitTechnologyReview(BasicNewsRecipe):
     no_stylesheets = True
     remove_empty_feeds = True
     remove_attributes = ['height', 'width', 'style', 'padding', 'padding-top']
+    delay = 1
     masthead_url = 'https://wp-preprod.technologyreview.com/wp-content/uploads/2021/08/Screen-Shot-2021-08-20-at-11.11.12-AM-e1629473232355.png'
     extra_css = '''
         #pub-d{font-size:small;}
@@ -61,30 +62,19 @@ class MitTechnologyReview(BasicNewsRecipe):
         ),
     ]
 
+    def get_cover_url(self):
+        soup = self.index_to_soup('https://www.technologyreview.com/')
+        if script := soup.find('script', id='preload'):
+            link = re.findall('https\S+?front_cover\S+?.png', self.tag_to_string(script))
+            return link[-1] + '?fit=572,786'
+
     def parse_index(self):
         soup = self.index_to_soup(self.INDEX)
-        self.timefmt = ' [{}]'.format(
-            self.tag_to_string(
-                soup.find(
-                    attrs={
-                        'class': lambda x: x and x.startswith('magazineHero__date')
-                    }
-                )
-            )
-        )
-        # find cover
-        self.cover_url = soup.find(
-            "div",
-            attrs={
-                "class":
-                lambda name: name.startswith("magazineHero__image")
-                if name else False
-            }
-        ).find(
-            "img",
-            srcset=True,
-            attrs={"class": lambda x: x.startswith('image__img') if x else False}
-        )['srcset'].split()[0]
+        issue = soup.find('h1', attrs={'class':lambda x: x and x.startswith('magazineHero__title')})
+        time = soup.find(attrs={'class': lambda x: x and x.startswith('magazineHero__date')})
+        self.timefmt = ' (' + self.tag_to_string(issue) + ') [' + self.tag_to_string(time) + ']'
+        self.log('Downloading issue: ', self.timefmt)
+
         # parse articles
         feeds = OrderedDict()
 
@@ -102,7 +92,8 @@ class MitTechnologyReview(BasicNewsRecipe):
             a = div.find('a', href=True)
             title = self.tag_to_string(a).strip()
             href = absurl(a['href'])
-
+            desc = ''
+            section_title = 'Letter from the editor'
             d = div.findParent(
                 attrs={
                     'class':
@@ -110,24 +101,26 @@ class MitTechnologyReview(BasicNewsRecipe):
                     startswith(('teaserItem__wrapper', 'teaserItem--aside__wrapper'))
                 }
             )
-            desc = self.tag_to_string(
-                d.find(
+            if d:
+
+                excerpt = d.find(
+                        attrs={
+                            'class':
+                            lambda x: x and x.startswith(
+                                ('teaserItem__excerpt', 'teaserItem--aside__excerpt')
+                            )
+                        }
+                    )
+                if excerpt:
+                    desc = self.tag_to_string(excerpt).strip()
+
+                sec = d.find(
                     attrs={
-                        'class':
-                        lambda x: x and x.startswith(
-                            ('teaserItem__excerpt', 'teaserItem--aside__excerpt')
-                        )
+                        'class': lambda x: x and x.startswith('teaserItem__eyebrowText')
                     }
                 )
-            ).strip()
-
-            sec = d.find(
-                attrs={
-                    'class': lambda x: x and x.startswith('teaserItem__eyebrowText')
-                }
-            )
-
-            section_title = self.tag_to_string(sec).replace('Categorized in ',
+                if sec:
+                    section_title = self.tag_to_string(sec).replace('Categorized in ',
                                                             '').strip()
 
             if not href or not title:

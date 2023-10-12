@@ -35,7 +35,7 @@ from calibre.gui2.tweak_book.editor.themes import (
 from calibre.gui2.tweak_book.widgets import PARAGRAPH_SEPARATOR, PlainTextEdit
 from calibre.spell.break_iterator import index_of
 from calibre.utils.icu import (
-    capitalize, lower, safe_chr, string_length, swapcase, upper
+    capitalize, lower, safe_chr, string_length, swapcase, upper, utf16_length
 )
 from calibre.utils.img import image_to_data
 from calibre.utils.titlecase import titlecase
@@ -180,7 +180,7 @@ class TextEdit(PlainTextEdit):
                     name = path
                 else:
                     name = get_name(os.path.basename(path))
-                    with lopen(path, 'rb') as f:
+                    with open(path, 'rb') as f:
                         name = add_file(name, f.read(), mt)
                 href = get_href(name)
                 if mt.startswith('image/'):
@@ -470,6 +470,7 @@ class TextEdit(PlainTextEdit):
         start, end = m.span()
         if start == end:
             return False
+        end = start + utf16_length(raw[start:end])
         if wrap and not complete:
             if reverse:
                 textpos = c.anchor()
@@ -515,6 +516,7 @@ class TextEdit(PlainTextEdit):
             start, end = m.span()
             if start == end:
                 return False
+            end = start + utf16_length(raw[start:end])
         if reverse:
             start, end = end, start
         c.clearSelection()
@@ -865,25 +867,13 @@ class TextEdit(PlainTextEdit):
             'bold': ('<b>', '</b>'),
             'italic': ('<i>', '</i>'),
             'underline': ('<u>', '</u>'),
-            'strikethrough': ('<strike>', '</strike>'),
+            'strikethrough': ('<span style="text-decoration: line-through">', '</span>'),
             'superscript': ('<sup>', '</sup>'),
             'subscript': ('<sub>', '</sub>'),
             'color': ('<span style="color: %s">' % color, '</span>'),
             'background-color': ('<span style="background-color: %s">' % color, '</span>'),
         }[formatting]
-        left, right = self.get_range_inside_tag()
-        c = self.textCursor()
-        c.setPosition(left)
-        c.setPosition(right, QTextCursor.MoveMode.KeepAnchor)
-        prev_text = str(c.selectedText()).rstrip('\0')
-        c.insertText(prefix + prev_text + suffix)
-        if prev_text:
-            right = c.position()
-            c.setPosition(left)
-            c.setPosition(right, QTextCursor.MoveMode.KeepAnchor)
-        else:
-            c.setPosition(c.position() - len(suffix))
-        self.setTextCursor(c)
+        self.smarts.surround_with_custom_tag(self, prefix, suffix)
 
     def insert_image(self, href, fullpage=False, preserve_aspect_ratio=False, width=-1, height=-1):
         if width <= 0:

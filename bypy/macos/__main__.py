@@ -20,13 +20,14 @@ from functools import partial, reduce
 from itertools import repeat
 
 from bypy.constants import (
-    OUTPUT_DIR, PREFIX, PYTHON, SRC as CALIBRE_DIR, python_major_minor_version
+    OUTPUT_DIR, PREFIX, PYTHON, SRC as CALIBRE_DIR, python_major_minor_version,
 )
 from bypy.freeze import (
-    extract_extension_modules, fix_pycryptodome, freeze_python, path_to_freeze_dir
+    extract_extension_modules, fix_pycryptodome, freeze_python, is_package_dir,
+    path_to_freeze_dir,
 )
 from bypy.utils import (
-    current_dir, get_arches_in_binary, mkdtemp, py_compile, timeit, walk
+    current_dir, get_arches_in_binary, mkdtemp, py_compile, timeit, walk,
 )
 
 abspath, join, basename, dirname = os.path.abspath, os.path.join, os.path.basename, os.path.dirname
@@ -270,7 +271,7 @@ class Freeze:
     @flush
     def get_local_dependencies(self, path_to_lib):
         for x, is_id in self.get_dependencies(path_to_lib):
-            if x.startswith('@rpath/Qt') or x.startswith('@rpath/libexpat'):
+            if x.startswith('@rpath/Qt') or x.startswith('@rpath/libexpat') or x.startswith('@rpath/libpodofo') or x.startswith('@rpath/libzstd'):
                 yield x, x[len('@rpath/'):], is_id
             elif x in ('libunrar.dylib', 'libstemmer.0.dylib', 'libstemmer.dylib') and not is_id:
                 yield x, x, is_id
@@ -414,9 +415,6 @@ class Freeze:
             raise SystemExit('No calibre plugins found in: ' + self.ext_dir)
         for f in plugins:
             self.fix_dependencies_in_lib(f)
-            if f.endswith('/podofo.so'):
-                self.change_dep('libpodofo.0.9.7.dylib',
-                    '@executable_path/../Frameworks/libpodofo.0.9.7.dylib', False, f)
 
     @flush
     def create_plist(self):
@@ -476,7 +474,7 @@ class Freeze:
     @flush
     def add_podofo(self):
         print('\nAdding PoDoFo')
-        pdf = join(PREFIX, 'lib', 'libpodofo.0.9.7.dylib')
+        pdf = join(PREFIX, 'lib', 'libpodofo.2.dylib')
         self.install_dylib(pdf)
 
     @flush
@@ -491,9 +489,9 @@ class Freeze:
     @flush
     def add_imaging_libs(self):
         print('\nAdding libjpeg, libpng, libwebp, optipng and mozjpeg')
-        for x in ('jpeg.8', 'png16.16', 'webp.7', 'webpmux.3', 'webpdemux.2'):
+        for x in ('jpeg.8', 'png16.16', 'webp.7', 'webpmux.3', 'webpdemux.2', 'sharpyuv.0'):
             self.install_dylib(join(PREFIX, 'lib', 'lib%s.dylib' % x))
-        for x in 'optipng', 'JxrDecApp':
+        for x in 'optipng', 'JxrDecApp', 'cwebp':
             self.install_dylib(join(PREFIX, 'bin', x), set_id=False, dest=self.helpers_dir)
         for x in ('jpegtran', 'cjpeg'):
             self.install_dylib(
@@ -529,7 +527,7 @@ class Freeze:
             'usb-1.0.0', 'mtp.9', 'chm.0', 'sqlite3.0', 'hunspell-1.7.0',
             'icudata.70', 'icui18n.70', 'icuio.70', 'icuuc.70', 'hyphen.0', 'uchardet.0',
             'stemmer.0', 'xslt.1', 'exslt.0', 'xml2.2', 'z.1', 'unrar', 'lzma.5',
-            'brotlicommon.1', 'brotlidec.1', 'brotlienc.1',
+            'brotlicommon.1', 'brotlidec.1', 'brotlienc.1', 'zstd.1',
             'crypto.1.1', 'ssl.1.1', 'iconv.2',  # 'ltdl.7'
         ):
             print('\nAdding', x)
@@ -587,7 +585,7 @@ class Freeze:
     def add_packages_from_dir(self, src):
         for x in os.listdir(src):
             x = join(src, x)
-            if os.path.isdir(x) and os.path.exists(join(x, '__init__.py')):
+            if os.path.isdir(x) and is_package_dir(x):
                 if self.filter_package(basename(x)):
                     continue
                 self.add_package_dir(x)
@@ -742,15 +740,24 @@ class Freeze:
             e = plist['CFBundleDocumentTypes'][0]
             e['CFBundleTypeExtensions'] = [x.lower() for x in formats]
 
+        def headless_plist(plist):
+            plist['CFBundleDisplayName'] = 'calibre worker process'
+            plist['CFBundleExecutable'] = 'calibre-parallel'
+            plist['CFBundleIdentifier'] = 'com.calibre-ebook.calibre-parallel'
+            plist['LSBackgroundOnly'] = '1'
+            plist.pop('CFBundleDocumentTypes')
+
         self.create_app_clone('ebook-viewer.app', partial(specialise_plist, 'ebook-viewer', input_formats))
         self.create_app_clone('ebook-edit.app', partial(specialise_plist, 'ebook-edit', edit_formats),
                 base_dir=join(self.contents_dir, 'ebook-viewer.app', 'Contents'))
+        self.create_app_clone('headless.app', headless_plist,
+                base_dir=join(self.contents_dir, 'ebook-viewer.app', 'Contents', 'ebook-edit.app', 'Contents'))
         # We need to move the webengine resources into the deepest sub-app
         # because the sandbox gets set to the nearest enclosing app which
         # means that WebEngine will fail to access its resources when running
         # in the sub-apps unless they are present inside the sub app bundle
         # somewhere
-        base_dest = join(self.contents_dir, 'ebook-viewer.app', 'Contents', 'ebook-edit.app', 'Contents', 'SharedSupport')
+        base_dest = join(self.contents_dir, 'ebook-viewer.app', 'Contents', 'ebook-edit.app', 'Contents', 'headless.app', 'Contents', 'SharedSupport')
         os.mkdir(base_dest)
         base_src = os.path.realpath(join(self.frameworks_dir, 'QtWebEngineCore.framework/Resources'))
         items = [join(base_src, 'qtwebengine_locales')] + glob.glob(join(base_src, '*.pak')) + glob.glob(join(base_src, '*.dat'))
@@ -810,7 +817,8 @@ def main(args, ext_dir, test_runner):
     build_dir = abspath(join(mkdtemp('frozen-'), APPNAME + '.app'))
     inc_dir = abspath(mkdtemp('include'))
     if args.skip_tests:
-        test_runner = lambda *a: None
+        def test_runner(*a):
+            return None
     Freeze(build_dir, ext_dir, inc_dir, test_runner, dont_strip=args.dont_strip, sign_installers=args.sign_installers, notarize=args.notarize)
 
 

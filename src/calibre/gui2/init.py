@@ -7,15 +7,15 @@ __docformat__ = 'restructuredtext en'
 
 import functools
 from qt.core import (
-    QAction, QApplication, QDialog, QEvent, QIcon, QLabel, QMenu, QPixmap, QUrl,
-    QSizePolicy, QSplitter, QStackedWidget, QStatusBar, QStyle, QStyleOption,
-    QStylePainter, Qt, QTabBar, QTimer, QToolButton, QVBoxLayout, QWidget
+    QAction, QApplication, QDialog, QEvent, QIcon, QLabel, QMenu, QPixmap, QSizePolicy,
+    QSplitter, QStackedWidget, QStatusBar, QStyle, QStyleOption, QStylePainter, Qt,
+    QTabBar, QTimer, QToolButton, QUrl, QVBoxLayout, QWidget,
 )
 
 from calibre.constants import get_appname_for_display, get_version, ismacos
 from calibre.customize.ui import find_plugin
 from calibre.gui2 import (
-    config, error_dialog, gprefs, is_widescreen, open_local_file, open_url
+    config, error_dialog, gprefs, is_widescreen, open_local_file, open_url,
 )
 from calibre.gui2.book_details import BookDetails
 from calibre.gui2.layout_menu import LayoutMenu
@@ -26,7 +26,7 @@ from calibre.gui2.tag_browser.ui import TagBrowserWidget
 from calibre.gui2.widgets import LayoutButton, Splitter
 from calibre.utils.config import prefs
 from calibre.utils.icu import sort_key
-from calibre.utils.localization import localize_website_link
+from calibre.utils.localization import localize_website_link, ngettext
 
 _keep_refs = []
 
@@ -115,7 +115,7 @@ class LibraryViewMixin:  # {{{
 class QuickviewSplitter(QSplitter):  # {{{
 
     def __init__(self, parent=None, orientation=Qt.Orientation.Vertical, qv_widget=None):
-        QSplitter.__init__(self, parent=parent, orientation=orientation)
+        super().__init__(parent=parent, orientation=orientation)
         self.splitterMoved.connect(self.splitter_moved)
         self.setChildrenCollapsible(False)
         self.qv_widget = qv_widget
@@ -124,7 +124,7 @@ class QuickviewSplitter(QSplitter):  # {{{
         gprefs['quickview_dialog_heights'] = self.sizes()
 
     def resizeEvent(self, *args):
-        QSplitter.resizeEvent(self, *args)
+        super().resizeEvent(*args)
         if self.sizes()[1] != 0:
             gprefs['quickview_dialog_heights'] = self.sizes()
 
@@ -400,7 +400,7 @@ class VLTabs(QTabBar):  # {{{
         self.currentChanged.connect(self.tab_changed)
         self.tabMoved.connect(self.tab_moved, type=Qt.ConnectionType.QueuedConnection)
         self.tabCloseRequested.connect(self.tab_close)
-        self.setVisible(gprefs['show_vl_tabs'])
+        self.update_visibility()
         self.next_action = a = QAction(self)
         a.triggered.connect(partial(self.next_tab, delta=1)), self.gui.addAction(a)
         self.previous_action = a = QAction(self)
@@ -421,14 +421,17 @@ class VLTabs(QTabBar):  # {{{
             idx = (self.currentIndex() + delta) % self.count()
             self.setCurrentIndex(idx)
 
+    def update_visibility(self):
+        self.setVisible(gprefs['show_vl_tabs'] and self.count() > 1)
+
     def enable_bar(self):
         gprefs['show_vl_tabs'] = True
-        self.setVisible(True)
+        self.update_visibility()
         self.gui.set_number_of_books_shown()
 
     def disable_bar(self):
         gprefs['show_vl_tabs'] = False
-        self.setVisible(False)
+        self.update_visibility()
         self.gui.set_number_of_books_shown()
 
     def lock_tab(self):
@@ -438,15 +441,18 @@ class VLTabs(QTabBar):  # {{{
     def unlock_tab(self):
         gprefs['vl_tabs_closable'] = True
         self.setTabsClosable(True)
-        try:
-            self.tabButton(0, QTabBar.ButtonPosition.RightSide).setVisible(False)
-        except AttributeError:
-            try:
-                self.tabButton(0, QTabBar.ButtonPosition.LeftSide).setVisible(False)
-            except AttributeError:
-                # On some OS X machines (using native style) the tab button is
-                # on the left
-                pass
+        for idx in range(self.count()):
+            if not self.tabData(idx):
+                try:
+                    self.tabButton(idx, QTabBar.ButtonPosition.RightSide).setVisible(False)
+                except AttributeError:
+                    try:
+                        self.tabButton(idx, QTabBar.ButtonPosition.LeftSide).setVisible(False)
+                    except AttributeError:
+                        # On some OS X machines (using native style) the tab button is
+                        # on the left
+                        pass
+                break
 
     def tab_changed(self, idx):
         if self.ignore_tab_changed:
@@ -515,6 +521,7 @@ class VLTabs(QTabBar):  # {{{
                 # On some OS X machines (using native style) the tab button is
                 # on the left
                 pass
+        self.update_visibility()
 
     def update_current(self):
         self.rebuild()
@@ -574,7 +581,7 @@ class LayoutMixin:  # {{{
             self.bd_splitter.addWidget(self.book_details)
             self.bd_splitter.setCollapsible(self.bd_splitter.other_index, False)
             self.centralwidget.layout().addWidget(self.bd_splitter)
-            button_order = ('sb', 'tb', 'bd', 'gv', 'cb', 'qv')
+            self.button_order = button_order = ('sb', 'tb', 'bd', 'gv', 'cb', 'qv')
         # }}}
         else:  # wide {{{
             self.bd_splitter = Splitter('book_details_splitter',
@@ -589,7 +596,7 @@ class LayoutMixin:  # {{{
             self.bd_splitter.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Expanding))
             self.centralwidget.layout().addWidget(self.bd_splitter)
-            button_order = ('sb', 'tb', 'cb', 'gv', 'qv', 'bd')
+            self.button_order = button_order = ('sb', 'tb', 'cb', 'gv', 'qv', 'bd')
         # }}}
 
         # This must use the base method to find the plugin because it hasn't
@@ -635,7 +642,7 @@ class LayoutMixin:  # {{{
             b.setAutoRaise(True), b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            b.setText(_('Layout')), b.setIcon(QIcon.ic('config.png'))
+            b.setText(_('Layout')), b.setIcon(QIcon.ic('layout.png'))
             b.setMenu(LayoutMenu(self))
             b.setToolTip(_(
                 'Show and hide various parts of the calibre main window'))
@@ -662,6 +669,7 @@ class LayoutMixin:  # {{{
                 self.iactions['Add Books'].remote_file_dropped_on_book,
                 type=Qt.ConnectionType.QueuedConnection)
         self.book_details.open_containing_folder.connect(self.iactions['View'].view_folder_for_id)
+        self.book_details.open_data_folder.connect(self.iactions['View'].view_data_folder_for_id)
         self.book_details.view_specific_format.connect(self.iactions['View'].view_format_by_id)
         self.book_details.search_requested.connect(self.set_search_string_with_append)
         self.book_details.remove_specific_format.connect(

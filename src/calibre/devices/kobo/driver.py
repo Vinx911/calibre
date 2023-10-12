@@ -10,6 +10,7 @@ Driver for Kobo eReaders. Supports all e-ink devices.
 
 Originally developed by Timothy Legge <timlegge@gmail.com>.
 Extended to support Touch firmware 2.0.0 and later and newer devices by David Forrester <davidfor@internode.on.net>
+Additional maintenance performed by Peter Thomas <peterjt@gmail.com>
 '''
 
 import os, time, shutil, re
@@ -1083,14 +1084,14 @@ class KOBO(USBMS):
                         fpath = self.normalize_path(fpath.replace('/', os.sep))
 
                         if os.path.exists(fpath):
-                            with lopen(cover, 'rb') as f:
+                            with open(cover, 'rb') as f:
                                 data = f.read()
 
                             # Return the data resized and grayscaled if
                             # required
                             data = save_cover_data_to(data, grayscale=uploadgrayscale, resize_to=resize, minify_to=resize)
 
-                            with lopen(fpath, 'wb') as f:
+                            with open(fpath, 'wb') as f:
                                 f.write(data)
                                 fsync(f)
 
@@ -1110,7 +1111,7 @@ class KOBO(USBMS):
         '''
         for idx, path in enumerate(paths):
             if path.find('kepub') >= 0:
-                with closing(lopen(path, 'rb')) as r:
+                with closing(open(path, 'rb')) as r:
                     tf = PersistentTemporaryFile(suffix='.epub')
                     shutil.copyfileobj(r, tf)
 #                    tf.write(r.read())
@@ -1380,11 +1381,11 @@ class KOBOTOUCH(KOBO):
         'Communicate with the Kobo Touch, Glo, Mini, Aura HD,'
         ' Aura H2O, Glo HD, Touch 2, Aura ONE, Aura Edition 2,'
         ' Aura H2O Edition 2, Clara HD, Forma, Libra H2O, Elipsa,'
-        ' Sage and Libra 2 eReaders.'
+        ' Sage, Libra 2 and Clara 2E eReaders.'
         ' Based on the existing Kobo driver by %s.') % KOBO.author
 #    icon        = 'devices/kobotouch.jpg'
 
-    supported_dbversion             = 171
+    supported_dbversion             = 174
     min_supported_dbversion         = 53
     min_dbversion_series            = 65
     min_dbversion_externalid        = 65
@@ -1398,7 +1399,7 @@ class KOBOTOUCH(KOBO):
     # Starting with firmware version 3.19.x, the last number appears to be is a
     # build number. A number will be recorded here but it can be safely ignored
     # when testing the firmware version.
-    max_supported_fwversion         = (4, 33, 19608)
+    max_supported_fwversion         = (4, 38, 21908)
     # The following document firmware versions where new function or devices were added.
     # Not all are used, but this feels a good place to record it.
     min_fwversion_shelves           = (2, 0, 0)
@@ -1419,6 +1420,7 @@ class KOBOTOUCH(KOBO):
     min_elipsa_fwversion            = (4, 28, 17820)
     min_libra2_fwversion            = (4, 29, 18730)
     min_sage_fwversion              = (4, 29, 18730)
+    min_clara2e_fwversion           = (4, 33, 19759)
     min_fwversion_audiobooks        = (4, 29, 18730)
     min_fwversion_bookstats         = (4, 32, 19501)
 
@@ -1447,7 +1449,9 @@ class KOBOTOUCH(KOBO):
     AURA_H2O_EDITION2_PRODUCT_ID = [0x4227]
     AURA_ONE_PRODUCT_ID = [0x4225]
     CLARA_HD_PRODUCT_ID = [0x4228]
+    CLARA_2E_PRODUCT_ID = [0x4235]
     ELIPSA_PRODUCT_ID   = [0x4233]
+    ELIPSA_2E_PRODUCT_ID   = [0x4236]
     FORMA_PRODUCT_ID    = [0x4229]
     GLO_PRODUCT_ID      = [0x4173]
     GLO_HD_PRODUCT_ID   = [0x4223]
@@ -1464,7 +1468,7 @@ class KOBOTOUCH(KOBO):
                           MINI_PRODUCT_ID + TOUCH_PRODUCT_ID + TOUCH2_PRODUCT_ID + \
                           AURA_ONE_PRODUCT_ID + CLARA_HD_PRODUCT_ID + FORMA_PRODUCT_ID + LIBRA_H2O_PRODUCT_ID + \
                           NIA_PRODUCT_ID + ELIPSA_PRODUCT_ID + \
-                          SAGE_PRODUCT_ID + LIBRA2_PRODUCT_ID
+                          SAGE_PRODUCT_ID + LIBRA2_PRODUCT_ID + CLARA_2E_PRODUCT_ID + ELIPSA_2E_PRODUCT_ID
 
     BCD = [0x0110, 0x0326, 0x401, 0x409]
 
@@ -1506,7 +1510,7 @@ class KOBOTOUCH(KOBO):
                           #       Kobo officially advertised the screen resolution with those chopped off.
                           ' - N3_FULL.parsed':        [(758,1014),0, 200,True,],
                           }
-    # Glo HD and Clara HD share resolution, so the image sizes should be the same.
+    # Glo HD, Clara HD and Clara 2E share resolution, so the image sizes should be the same.
     GLO_HD_COVER_FILE_ENDINGS = {
                           # Used for screensaver, home screen
                           ' - N3_FULL.parsed':        [(1072,1448), 0, 200,True,],
@@ -2839,7 +2843,7 @@ class KOBOTOUCH(KOBO):
                     debug_print("KoboTouch:_upload_cover - Image folder does not exist. Creating path='%s'" % (image_dir))
                     os.makedirs(image_dir)
 
-                with lopen(cover, 'rb') as f:
+                with open(cover, 'rb') as f:
                     cover_data = f.read()
 
                 fmt, width, height = identify(cover_data)
@@ -2899,7 +2903,7 @@ class KOBOTOUCH(KOBO):
                         #       through a temporary file...
                         if png_covers:
                             tmp_cover = better_mktemp()
-                            with lopen(tmp_cover, 'wb') as f:
+                            with open(tmp_cover, 'wb') as f:
                                 f.write(data)
 
                             optimize_png(tmp_cover, level=1)
@@ -2907,7 +2911,7 @@ class KOBOTOUCH(KOBO):
                             shutil.copy2(tmp_cover, fpath)
                             os.remove(tmp_cover)
                         else:
-                            with lopen(fpath, 'wb') as f:
+                            with open(fpath, 'wb') as f:
                                 f.write(data)
                                 fsync(f)
         except Exception as e:
@@ -3555,6 +3559,12 @@ class KOBOTOUCH(KOBO):
     def isClaraHD(self):
         return self.detected_device.idProduct in self.CLARA_HD_PRODUCT_ID
 
+    def isClara2E(self):
+        return self.detected_device.idProduct in self.CLARA_2E_PRODUCT_ID
+
+    def isElipsa2E(self):
+        return self.detected_device.idProduct in self.ELIPSA_2E_PRODUCT_ID
+
     def isElipsa(self):
         return self.detected_device.idProduct in self.ELIPSA_PRODUCT_ID
 
@@ -3603,8 +3613,12 @@ class KOBOTOUCH(KOBO):
             _cover_file_endings = self.AURA_ONE_COVER_FILE_ENDINGS
         elif self.isClaraHD():
             _cover_file_endings = self.GLO_HD_COVER_FILE_ENDINGS
+        elif self.isClara2E():
+            _cover_file_endings = self.GLO_HD_COVER_FILE_ENDINGS
         elif self.isElipsa():
             _cover_file_endings = self.AURA_ONE_COVER_FILE_ENDINGS
+        elif self.isElipsa2E():
+            _cover_file_endings = self.GLO_HD_COVER_FILE_ENDINGS
         elif self.isForma():
             _cover_file_endings = self.FORMA_COVER_FILE_ENDINGS
         elif self.isGlo():
@@ -3649,8 +3663,12 @@ class KOBOTOUCH(KOBO):
             device_name = 'Kobo Aura ONE'
         elif self.isClaraHD():
             device_name = 'Kobo Clara HD'
+        elif self.isClara2E():
+            device_name = 'Kobo Clara 2E'
         elif self.isElipsa():
             device_name = 'Kobo Elipsa'
+        elif self.isElipsa2E():
+            device_name = 'Kobo Elipsa 2E'
         elif self.isForma():
             device_name = 'Kobo Forma'
         elif self.isGlo():

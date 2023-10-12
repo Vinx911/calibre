@@ -17,6 +17,8 @@ class OpenMagazine(BasicNewsRecipe):
     masthead_url = 'https://openthemagazine.com/wp-content/themes/open/images/logo.png'
     ignore_duplicate_articles = {'url'}
     extra_css = '[id^="caption-attachment"] {font-size: small;font-style: italic;}'
+    'blockquote{color:#404040;}'
+    '.about-author{font-size:small;}'
 
     def get_cover_url(self):
         soup = self.index_to_soup('https://openthemagazine.com/')

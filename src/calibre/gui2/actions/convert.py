@@ -7,14 +7,14 @@ __docformat__ = 'restructuredtext en'
 
 import os
 from functools import partial
-
 from qt.core import QModelIndex, QTimer
 
-from calibre.gui2 import error_dialog, Dispatcher, gprefs
-from calibre.gui2.tools import convert_single_ebook, convert_bulk_ebook
-from calibre.utils.config import prefs, tweaks
+from calibre.customize.ui import plugin_for_input_format, run_plugins_on_postconvert
+from calibre.gui2 import Dispatcher, error_dialog, gprefs
 from calibre.gui2.actions import InterfaceAction
-from calibre.customize.ui import plugin_for_input_format
+from calibre.gui2.tools import convert_bulk_ebook, convert_single_ebook
+from calibre.utils.config import prefs, tweaks
+from calibre.utils.localization import ngettext
 
 
 class ConvertAction(InterfaceAction):
@@ -274,6 +274,7 @@ class ConvertAction(InterfaceAction):
 
             with open(temp_files[-1].name, 'rb') as data:
                 db.add_format(book_id, fmt, data, index_is_id=True)
+            run_plugins_on_postconvert(db, book_id, fmt)
             self.gui.book_converted.emit(book_id, fmt)
             self.gui.status_bar.show_message(job.description + ' ' +
                     _('completed'), 2000)

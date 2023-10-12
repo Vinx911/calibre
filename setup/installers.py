@@ -52,6 +52,13 @@ def get_dist(base, which, bitness):
     return dist
 
 
+def shutdown_allowed(which, bitness):
+    # The ARM64 VM is extremely flakey often booting up to a non-functional
+    # state so dont shut it down as it seems to be more stable once bootup is
+    # done.
+    return bitness != 'arm64'
+
+
 def build_only(which, bitness, spec, shutdown=False):
     base, bypy = get_paths()
     exe = get_exe()
@@ -62,7 +69,7 @@ def build_only(which, bitness, spec, shutdown=False):
         raise SystemExit(ret)
     dist = get_dist(base, which, bitness)
     dist = os.path.join(dist, 'c-extensions')
-    if shutdown:
+    if shutdown and shutdown_allowed(which, bitness):
         cmd = get_cmd(exe, bypy, which, bitness, action='shutdown')
         subprocess.Popen(cmd).wait()
     return dist
@@ -87,7 +94,7 @@ def build_single(which='windows', bitness='64', shutdown=True, sign_installers=T
         except OSError:
             pass
         os.link(src, dest)
-    if shutdown:
+    if shutdown and shutdown_allowed(which, bitness):
         cmd = get_cmd(exe, bypy, which, bitness, action='shutdown')
         subprocess.Popen(cmd).wait()
 
@@ -231,13 +238,17 @@ class ExtDev(Command):
     def run(self, opts):
         which, ext = opts.cli_args[:2]
         cmd = opts.cli_args[2:] or ['calibre-debug', '--test-build']
-        bitness = '64' if which == 'windows' else ''
-        ext_dir = build_only(which, bitness, ext)
         if which == 'windows':
+            cp = subprocess.run([sys.executable, 'setup.py', 'build', '--cross-compile-extensions=windows', f'--only={ext}'])
+            if cp.returncode != 0:
+                raise SystemExit(cp.returncode)
+            src = f'src/calibre/plugins/{ext}.cross-windows-x64.pyd'
             host = 'win'
             path = '/cygdrive/c/Program Files/Calibre2/app/bin/{}.pyd'
             bin_dir = '/cygdrive/c/Program Files/Calibre2'
         elif which == 'macos':
+            ext_dir = build_only(which, '', ext)
+            src = os.path.join(ext_dir, os.path.basename(path))
             print(
                 "\n\n\x1b[33;1mWARNING: This does not work on macOS, unless you use un-signed builds with ",
                 ' ./update-on-ox develop\x1b[m',
@@ -245,6 +256,8 @@ class ExtDev(Command):
             host = 'ox'
             path = '/Applications/calibre.app/Contents/Frameworks/plugins/{}.so'
             bin_dir = '/Applications/calibre.app/Contents/MacOS'
+        else:
+            raise SystemExit(f'Unknown OS {which}')
         control_path = os.path.expanduser('~/.ssh/extdev-master-%C')
         if subprocess.Popen([
             'ssh', '-o', 'ControlMaster=auto', '-o', 'ControlPath=' + control_path, '-o', 'ControlPersist=yes', host,
@@ -253,8 +266,7 @@ class ExtDev(Command):
             raise SystemExit(1)
         try:
             path = path.format(ext)
-            src = os.path.join(ext_dir, os.path.basename(path))
-            subprocess.check_call(['ssh', '-S', control_path, host, 'chmod', '+w', f'"{path}"'])
+            subprocess.check_call(['ssh', '-S', control_path, host, 'chmod', '+wx', f'"{path}"'])
             with open(src, 'rb') as f:
                 p = subprocess.Popen(['ssh', '-S', control_path, host, f'cat - > "{path}"'], stdin=subprocess.PIPE)
                 p.communicate(f.read())

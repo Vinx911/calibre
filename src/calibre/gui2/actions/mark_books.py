@@ -5,13 +5,15 @@ __license__ = 'GPL v3'
 __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 
 from functools import partial
-
-from qt.core import (QTimer, QApplication, Qt, QEvent, QDialog, QMenu, QIcon,
-                     QDialogButtonBox, QPushButton, QLabel, QGridLayout)
+from qt.core import (
+    QApplication, QDialog, QDialogButtonBox, QEvent, QGridLayout, QIcon, QLabel, QMenu,
+    QPushButton, Qt, QTimer,
+)
 
 from calibre.gui2 import error_dialog
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.widgets2 import HistoryComboBox
+from calibre.startup import connect_lambda
 from calibre.utils.icu import sort_key
 
 
@@ -146,7 +148,7 @@ class MarkBooksAction(InterfaceAction):
         connect_lambda(a.triggered, self, lambda self: self.mark_field('series', False))
 
     def gui_layout_complete(self):
-        for x in self.gui.bars_manager.main_bars + self.gui.bars_manager.child_bars:
+        for x in self.gui.bars_manager.bars:
             try:
                 w = x.widgetForAction(self.qaction)
                 w.installEventFilter(self)

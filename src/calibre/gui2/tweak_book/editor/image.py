@@ -5,14 +5,16 @@ __license__ = 'GPL v3'
 __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 
 import sys
-
 from qt.core import (
-    QMainWindow, Qt, QApplication, pyqtSignal, QLabel, QIcon, QFormLayout, QSize,
-    QDialog, QSpinBox, QCheckBox, QDialogButtonBox, QToolButton, QMenu, QInputDialog)
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QIcon,
+    QInputDialog, QLabel, QMainWindow, QMenu, QSize, QSpinBox, Qt, QToolButton,
+    pyqtSignal,
+)
 
 from calibre.gui2 import error_dialog
-from calibre.gui2.tweak_book import actions, tprefs, editors
+from calibre.gui2.tweak_book import actions, editors, tprefs
 from calibre.gui2.tweak_book.editor.canvas import Canvas
+from calibre.startup import connect_lambda
 from polyglot.builtins import itervalues
 
 
@@ -163,9 +165,7 @@ class Editor(QMainWindow):
         self._is_modified = False  # The image_changed signal will have been triggered causing this editor to be incorrectly marked as modified
 
     def replace_data(self, raw, only_if_different=True):
-        # We ignore only_if_different as it is useless in our case, and
-        # there is no easy way to check two images for equality
-        self.data = raw
+        self.canvas.load_image(raw, only_if_different=only_if_different)
 
     def apply_settings(self, prefs=None, dictionaries_changed=False):
         pass

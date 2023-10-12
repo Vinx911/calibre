@@ -5,22 +5,27 @@ __license__   = 'GPL v3'
 __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import os, weakref, shutil, textwrap
+import os
+import shutil
+import textwrap
+import weakref
 from collections import OrderedDict
 from functools import partial
-from polyglot.builtins import iteritems, itervalues
+from qt.core import (
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QIcon,
+    QInputDialog, QLabel, QMenu, QModelIndex, QSize, QSizePolicy, QSpacerItem, Qt,
+    QTextEdit, QTimer,
+)
 
-from qt.core import (QDialog, QGridLayout, QIcon, QCheckBox, QLabel, QFrame,
-                      QApplication, QDialogButtonBox, Qt, QSize, QSpacerItem,
-                      QSizePolicy, QTimer, QModelIndex, QTextEdit,
-                      QInputDialog, QMenu)
-
-from calibre.gui2 import error_dialog, Dispatcher, gprefs, question_dialog
+from calibre.gui2 import Dispatcher, error_dialog, gprefs, question_dialog
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.convert.metadata import create_opf_file
 from calibre.gui2.dialogs.progress import ProgressDialog
 from calibre.ptempfile import PersistentTemporaryDirectory
+from calibre.startup import connect_lambda
 from calibre.utils.config_base import tweaks
+from calibre.utils.localization import ngettext
+from polyglot.builtins import iteritems, itervalues
 
 
 class Polish(QDialog):  # {{{
@@ -140,8 +145,11 @@ class Polish(QDialog):  # {{{
         connect_lambda(b.clicked, self, lambda self: self.select_all(False))
         l.addWidget(bb, count+1, 1, 1, -1)
         self.setup_load_button()
+        self.resize(self.sizeHint())
 
-        self.resize(QSize(950, 600))
+    def sizeHint(self):
+        sz = super().sizeHint()
+        return QSize(max(950, sz.width()), max(600, sz.height()))
 
     def select_all(self, enable):
         for action in self.all_actions:

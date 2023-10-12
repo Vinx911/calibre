@@ -5,7 +5,7 @@ __license__   = 'GPL v3'
 __copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import datetime
+import datetime, os
 from io import BytesIO
 from time import time
 
@@ -455,6 +455,12 @@ class ReadingTest(BaseTest):
         buf = BytesIO()
         self.assertRaises(NoSuchFormat, cache.copy_format_to, 99999, 'X', buf, 'copy_format_to() failed to raise an exception for non-existent book')
         self.assertRaises(NoSuchFormat, cache.copy_format_to, 1, 'X', buf, 'copy_format_to() failed to raise an exception for non-existent format')
+        fmt = cache.formats(1)[0]
+        path = cache.format_abspath(1, fmt)
+        changed_path = os.path.join(os.path.dirname(path), 'x' + os.path.basename(path))
+        os.rename(path, changed_path)
+        self.assertEqual(cache.format_abspath(1, fmt), path)
+        self.assertFalse(os.path.exists(changed_path))
 
     # }}}
 
@@ -606,9 +612,12 @@ class ReadingTest(BaseTest):
             self.assertSetEqual(set(mi.custom_field_keys()), set(pmi.custom_field_keys()))
 
             for field in STANDARD_METADATA_FIELDS | {'#series_index'}:
-                f = lambda x: x
                 if field == 'formats':
-                    f = lambda x: x if x is None else tuple(x)
+                    def f(x):
+                        return (x if x is None else tuple(x))
+                else:
+                    def f(x):
+                        return x
                 self.assertEqual(f(getattr(mi, field)), f(getattr(pmi, field)),
                                 f'Standard field: {field} not the same for book {book_id}')
                 self.assertEqual(mi.format_field(field), pmi.format_field(field),
@@ -639,6 +648,65 @@ class ReadingTest(BaseTest):
         cache = self.init_cache()
         mi, pmi = cache.get_metadata(1), cache.get_proxy_metadata(1)
         self.assertEqual(mi.get('#comp1'), pmi.get('#comp1'))
+
+        # Test overridden Metadata methods
+
+        self.assertTrue(pmi.has_key('tags') == mi.has_key('tags'))
+
+        self.assertFalse(pmi.has_key('taggs'), 'taggs attribute')
+        self.assertTrue(pmi.has_key('taggs') == mi.has_key('taggs'))
+
+        self.assertSetEqual(set(pmi.custom_field_keys()), set(mi.custom_field_keys()))
+
+        self.assertEqual(pmi.get_extra('#series', 0), 3)
+        self.assertEqual(pmi.get_extra('#series', 0), mi.get_extra('#series', 0))
+
+        self.assertDictEqual(pmi.get_identifiers(), {'test': 'two'})
+        self.assertDictEqual(pmi.get_identifiers(), mi.get_identifiers())
+
+        self.assertTrue(pmi.has_identifier('test'))
+        self.assertTrue(pmi.has_identifier('test') == mi.has_identifier('test'))
+
+        self.assertListEqual(list(pmi.custom_field_keys()), list(mi.custom_field_keys()))
+
+        # ProxyMetadata has the virtual fields while Metadata does not.
+        self.assertSetEqual(set(pmi.all_field_keys())-{'id', 'series_sort', 'path',
+                                                       'in_tag_browser', 'sort', 'ondevice',
+                                                       'au_map', 'marked', '#series_index'},
+                            set(mi.all_field_keys()))
+
+        # mi.get_standard_metadata() doesn't include the rec_index metadata key
+        fm_pmi = pmi.get_standard_metadata('series')
+        fm_pmi.pop('rec_index')
+        self.assertDictEqual(fm_pmi, mi.get_standard_metadata('series', make_copy=False))
+
+        # The ProxyMetadata versions don't include the values. Note that the mi
+        # version of get_standard_metadata won't return custom columns while the
+        # ProxyMetadata version will
+        fm_mi = mi.get_user_metadata('#series', make_copy=False)
+        fm_mi.pop('#extra#')
+        fm_mi.pop('#value#')
+        self.assertDictEqual(pmi.get_standard_metadata('#series'), fm_mi)
+        self.assertDictEqual(pmi.get_user_metadata('#series'), fm_mi)
+
+        fm_mi = mi.get_all_user_metadata(make_copy=False)
+        for one in fm_mi:
+            fm_mi[one].pop('#extra#', None)
+            fm_mi[one].pop('#value#', None)
+        self.assertDictEqual(pmi.get_all_user_metadata(make_copy=False), fm_mi)
+
+        # Check the unimplemented methods
+        self.assertRaises(NotImplementedError, lambda: 'foo' in pmi)
+        self.assertRaises(NotImplementedError, pmi.set, 'a', 'a')
+        self.assertRaises(NotImplementedError, pmi.set_identifiers, 'a', 'a')
+        self.assertRaises(NotImplementedError, pmi.set_identifier, 'a', 'a')
+        self.assertRaises(NotImplementedError, pmi.all_non_none_fields)
+        self.assertRaises(NotImplementedError, pmi.set_all_user_metadata, {})
+        self.assertRaises(NotImplementedError, pmi.set_user_metadata, 'a', {})
+        self.assertRaises(NotImplementedError, pmi.remove_stale_user_metadata, {})
+        self.assertRaises(NotImplementedError, pmi.template_to_attribute, {}, {})
+        self.assertRaises(NotImplementedError, pmi.smart_update, {})
+
 
     # }}}
 
@@ -804,4 +872,86 @@ class ReadingTest(BaseTest):
         # test getting value of an int (rating)
         v = formatter.safe_format('program: book_values("rating", "title:true", ",", 0)', {}, 'TEMPLATE ERROR', mi)
         self.assertEqual(set(v.split(',')), {'4', '6'})
+    # }}}
+
+    def test_python_templates(self):  # {{{
+        from calibre.ebooks.metadata.book.formatter import SafeFormat
+        formatter = SafeFormat()
+
+        # need an empty metadata object to pass to the formatter
+        db = self.init_legacy(self.library_path)
+        mi = db.get_metadata(1)
+
+        # test counting books matching a search
+        template = '''python:
+def evaluate(book, ctx):
+    ids = ctx.db.new_api.search("series:true")
+    return str(len(ids))
+'''
+        v = formatter.safe_format(template, {}, 'TEMPLATE ERROR', mi)
+        self.assertEqual(v, '2')
+
+        # test counting books when none match the search
+        template = '''python:
+def evaluate(book, ctx):
+    ids = ctx.db.new_api.search("series:afafaf")
+    return str(len(ids))
+'''
+        v = formatter.safe_format(template, {}, 'TEMPLATE ERROR', mi)
+        self.assertEqual(v, '0')
+
+        # test is_multiple values
+        template = '''python:
+def evaluate(book, ctx):
+    tags = ctx.db.new_api.all_field_names('tags')
+    return ','.join(list(tags))
+'''
+        v = formatter.safe_format(template, {}, 'TEMPLATE ERROR', mi)
+        self.assertEqual(set(v.split(',')), {'Tag One', 'News', 'Tag Two'})
+
+        # test using a custom context class
+        template = '''python:
+def evaluate(book, ctx):
+    tags = ctx.db.new_api.all_field_names('tags')
+    return ','.join(list(ctx.helper_function(tags)))
+'''
+        from calibre.utils.formatter import PythonTemplateContext
+
+        class CustomContext(PythonTemplateContext):
+            def helper_function(self, arg):
+                s = set(arg)
+                s.add('helper called')
+                return s
+
+        v = formatter.safe_format(template, {}, 'TEMPLATE ERROR', mi,
+                                  python_context_object=CustomContext())
+        self.assertEqual(set(v.split(',')), {'Tag One', 'News', 'Tag Two','helper called'})
+
+        # test is_multiple values
+        template = '''python:
+def evaluate(book, ctx):
+    tags = ctx.db.new_api.all_field_names('tags')
+    return ','.join(list(tags))
+'''
+        v = formatter.safe_format(template, {}, 'TEMPLATE ERROR', mi)
+        self.assertEqual(set(v.split(',')), {'Tag One', 'News', 'Tag Two'})
+
+        # test calling a python stored template from a GPM template
+        from calibre.utils.formatter_functions import (
+                load_user_template_functions, unload_user_template_functions)
+        load_user_template_functions('aaaaa',
+                                     [['python_stored_template',
+                                      "",
+                                      0,
+                                      '''python:
+def evaluate(book, ctx):
+    tags = set(ctx.db.new_api.all_field_names('tags'))
+    tags.add(ctx.arguments[0])
+    return ','.join(list(tags))
+'''
+                                      ]], None)
+        v = formatter.safe_format('program: python_stored_template("one argument")', {},
+                                  'TEMPLATE ERROR', mi)
+        unload_user_template_functions('aaaaa')
+        self.assertEqual(set(v.split(',')), {'Tag One', 'News', 'Tag Two', 'one argument'})
     # }}}

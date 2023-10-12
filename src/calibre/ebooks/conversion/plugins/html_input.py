@@ -13,9 +13,9 @@ from urllib.parse import quote
 
 from calibre.constants import isbsd, islinux
 from calibre.customize.conversion import InputFormatPlugin, OptionRecommendation
-from calibre.utils.filenames import ascii_filename
+from calibre.utils.filenames import ascii_filename, get_long_path_name
 from calibre.utils.imghdr import what
-from calibre.utils.localization import get_lang
+from calibre.utils.localization import __, get_lang
 from polyglot.builtins import as_unicode
 
 
@@ -37,6 +37,7 @@ class HTMLInput(InputFormatPlugin):
     description = _('Convert HTML and OPF files to an OEB')
     file_types  = {'opf', 'html', 'htm', 'xhtml', 'xhtm', 'shtm', 'shtml'}
     commit_name = 'html_input'
+    root_dir_for_absolute_links = ''
 
     options = {
         OptionRecommendation(name='breadth_first',
@@ -64,7 +65,20 @@ class HTMLInput(InputFormatPlugin):
                 )
         ),
 
+        OptionRecommendation(name='allow_local_files_outside_root',
+            recommended_value=False, level=OptionRecommendation.LOW,
+            help=_('Normally, resources linked to by the HTML file or its children will only be allowed'
+                   ' if they are in a sub-folder of the original HTML file. This option allows including'
+                   ' local files from any location on your computer. This can be a security risk if you'
+                   ' are converting untrusted HTML and expecting to distribute the result of the conversion.'
+                )
+        ),
+
+
     }
+
+    def set_root_dir_of_input(self, basedir):
+        self.root_dir_of_input = os.path.normcase(get_long_path_name(os.path.abspath(basedir)) + os.sep)
 
     def convert(self, stream, opts, file_ext, log,
                 accelerators):
@@ -76,6 +90,7 @@ class HTMLInput(InputFormatPlugin):
         if hasattr(stream, 'name'):
             basedir = os.path.dirname(stream.name)
             fname = os.path.basename(stream.name)
+        self.set_root_dir_of_input(basedir)
 
         if file_ext != 'opf':
             if opts.dont_package:
@@ -113,10 +128,11 @@ class HTMLInput(InputFormatPlugin):
         from calibre.ebooks.metadata import string_to_authors
         from calibre.ebooks.oeb.base import (
             BINARY_MIME, OEB_STYLES, DirContainer, rewrite_links, urldefrag,
-            urlnormalize, urlquote, xpath
+            urlnormalize, urlquote, xpath,
         )
         from calibre.ebooks.oeb.transforms.metadata import meta_info_to_oeb_metadata
         from calibre.utils.localization import canonicalize_lang
+        self.opts = opts
         css_parser.log.setLevel(logging.WARN)
         self.OEB_STYLES = OEB_STYLES
         oeb = create_oebbook(log, None, opts, self,
@@ -238,6 +254,9 @@ class HTMLInput(InputFormatPlugin):
             except:
                 self.log.warn('Failed to decode link %r. Ignoring'%link_)
                 return None, None
+        if self.root_dir_for_absolute_links and link_.startswith('/'):
+            link_ = link_.lstrip('/')
+            base = self.root_dir_for_absolute_links
         try:
             l = Link(link_, base if base else os.getcwd())
         except:
@@ -250,6 +269,13 @@ class HTMLInput(InputFormatPlugin):
         frag = l.fragment
         if not link:
             return None, None
+        link = os.path.abspath(os.path.realpath(link))
+        q = os.path.normcase(get_long_path_name(link))
+        if not q.startswith(self.root_dir_of_input):
+            if not self.opts.allow_local_files_outside_root:
+                if os.path.exists(q):
+                    self.log.warn('Not adding {} as it is outside the document root: {}'.format(q, self.root_dir_of_input))
+                return None, None
         return link, frag
 
     def resource_adder(self, link_, base=None):

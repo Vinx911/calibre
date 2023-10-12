@@ -22,10 +22,15 @@ builtins.__dict__['dynamic_property'] = lambda func: func(None)
 from calibre.constants import iswindows, ismacos, islinux, DEBUG, isfreebsd
 
 
-def get_debug_executable():
+def get_debug_executable(headless=False):
     exe_name = 'calibre-debug' + ('.exe' if iswindows else '')
     if hasattr(sys, 'frameworks_dir'):
         base = os.path.dirname(sys.frameworks_dir)
+        if headless:
+            from calibre.utils.ipc.launch import Worker
+            class W(Worker):
+                exe_name = 'calibre-debug'
+            return [W().executable]
         return [os.path.join(base, 'MacOS', exe_name)]
     if getattr(sys, 'run_local', None):
         return [sys.run_local, exe_name]
@@ -40,6 +45,24 @@ def get_debug_executable():
     if os.path.exists(nearby):
         return [nearby]
     return [exe_name]
+
+
+def connect_lambda(bound_signal, self, func, **kw):
+    import weakref
+    r = weakref.ref(self)
+    del self
+    num_args = func.__code__.co_argcount - 1
+    if num_args < 0:
+        raise TypeError('lambda must take at least one argument')
+
+    def slot(*args):
+        ctx = r()
+        if ctx is not None:
+            if len(args) != num_args:
+                args = args[:num_args]
+            func(ctx, *args)
+
+    bound_signal.connect(slot, **kw)
 
 
 def initialize_calibre():
@@ -82,13 +105,19 @@ def initialize_calibre():
     spawn.get_command_line = get_command_line
     orig_spawn_passfds = util.spawnv_passfds
 
+    def wrapped_orig_spawn_fds(args, passfds):
+        # as of python 3.11 util.spawnv_passfds expects bytes args
+        if sys.version_info >= (3, 11):
+            args = [x.encode('utf-8') if isinstance(x, str) else x for x in args]
+        return orig_spawn_passfds(args[0], args, passfds)
+
     def spawnv_passfds(path, args, passfds):
         try:
             idx = args.index('-c')
         except ValueError:
-            return orig_spawn_passfds(args[0], args, passfds)
+            return wrapped_orig_spawn_fds(args, passfds)
         patched_args = get_debug_executable() + ['--fix-multiprocessing', '--'] + args[idx + 1:]
-        return orig_spawn_passfds(patched_args[0], patched_args, passfds)
+        return wrapped_orig_spawn_fds(patched_args, passfds)
     util.spawnv_passfds = spawnv_passfds
 
     #
@@ -126,22 +155,6 @@ def initialize_calibre():
     builtins.__dict__['icu_upper'] = icu_upper
     builtins.__dict__['icu_title'] = title_case
 
-    def connect_lambda(bound_signal, self, func, **kw):
-        import weakref
-        r = weakref.ref(self)
-        del self
-        num_args = func.__code__.co_argcount - 1
-        if num_args < 0:
-            raise TypeError('lambda must take at least one argument')
-
-        def slot(*args):
-            ctx = r()
-            if ctx is not None:
-                if len(args) != num_args:
-                    args = args[:num_args]
-                func(ctx, *args)
-
-        bound_signal.connect(slot, **kw)
     builtins.__dict__['connect_lambda'] = connect_lambda
 
     if islinux or ismacos or isfreebsd:

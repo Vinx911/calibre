@@ -5,19 +5,22 @@ __copyright__ = '2008, Kovid Goyal kovid@kovidgoyal.net'
 __docformat__ = 'restructuredtext en'
 __license__   = 'GPL v3'
 
-from functools import partial
 from contextlib import contextmanager
-
-from qt.core import (Qt, QDialog, QTableWidgetItem, QAbstractItemView, QIcon,
-                  QDialogButtonBox, QFrame, QLabel, QTimer, QMenu, QApplication,
-                  QByteArray, QItemDelegate, QAction)
+from functools import partial
+from qt.core import (
+    QAbstractItemView, QAction, QApplication, QDialog, QDialogButtonBox, QFrame, QIcon,
+    QItemDelegate, QLabel, QMenu, Qt, QTableWidgetItem, QTimer,
+)
 
 from calibre.ebooks.metadata import author_to_author_sort, string_to_authors
 from calibre.gui2 import error_dialog, gprefs
 from calibre.gui2.dialogs.edit_authors_dialog_ui import Ui_EditAuthorsDialog
 from calibre.utils.config import prefs
 from calibre.utils.config_base import tweaks
-from calibre.utils.icu import sort_key, primary_contains, contains, primary_startswith
+from calibre.utils.icu import (
+    contains, lower as icu_lower, primary_contains, primary_startswith, sort_key,
+    upper as icu_upper,
+)
 
 QT_HIDDEN_CLEAR_ACTION = '_q_qlineeditclearaction'
 
@@ -78,18 +81,17 @@ class EditAuthorsDialog(QDialog, Ui_EditAuthorsDialog):
         try:
             self.table_column_widths = \
                         gprefs.get('manage_authors_table_widths', None)
-            geom = gprefs.get('manage_authors_dialog_geometry', None)
-            if geom:
-                QApplication.instance().safe_restore_geometry(self, QByteArray(geom))
+            self.restore_geometry(gprefs, 'manage_authors_dialog_geometry')
         except Exception:
             pass
 
         self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText(_('&OK'))
         self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText(_('&Cancel'))
         self.buttonBox.accepted.connect(self.accepted)
+        self.buttonBox.rejected.connect(self.rejected)
         self.apply_vl_checkbox.stateChanged.connect(self.use_vl_changed)
 
-        # Set up the heading for sorting
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
 
         self.find_aut_func = find_aut_func
@@ -110,6 +112,10 @@ class EditAuthorsDialog(QDialog, Ui_EditAuthorsDialog):
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self.do_sort)
         hh.setSortIndicatorShown(True)
+
+        vh = self.table.verticalHeader()
+        vh.setDefaultSectionSize(gprefs.get('general_category_editor_row_height', vh.defaultSectionSize()))
+        vh.sectionResized.connect(self.row_height_changed)
 
         # set up the search & filter boxes
         self.find_box.initialize('manage_authors_search')
@@ -270,12 +276,18 @@ class EditAuthorsDialog(QDialog, Ui_EditAuthorsDialog):
             self.start_find_pos = -1
         self.table.blockSignals(False)
 
+    def row_height_changed(self, row, old, new):
+        self.table.verticalHeader().blockSignals(True)
+        self.table.verticalHeader().setDefaultSectionSize(new)
+        self.table.verticalHeader().blockSignals(False)
+
     def save_state(self):
         self.table_column_widths = []
         for c in range(0, self.table.columnCount()):
             self.table_column_widths.append(self.table.columnWidth(c))
+        gprefs['general_category_editor_row_height'] = self.table.verticalHeader().sectionSize(0)
         gprefs['manage_authors_table_widths'] = self.table_column_widths
-        gprefs['manage_authors_dialog_geometry'] = bytearray(self.saveGeometry())
+        self.save_geometry(gprefs, 'manage_authors_dialog_geometry')
 
     def table_column_resized(self, col, old, new):
         self.table_column_widths = []
@@ -449,6 +461,9 @@ class EditAuthorsDialog(QDialog, Ui_EditAuthorsDialog):
             orig = self.original_authors[id_]
             if orig != v:
                 self.result.append((id_, orig['name'], v['name'], v['sort'], v['link']))
+
+    def rejected(self):
+        self.save_state()
 
     def do_recalc_author_sort(self):
         with self.no_cell_changed():

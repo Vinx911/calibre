@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urlsplit
 
 from calibre import (
     __appname__, as_unicode, browser, force_unicode, iswindows, preferred_encoding,
-    random_user_agent, strftime
+    random_user_agent, strftime,
 )
 from calibre.ebooks.BeautifulSoup import BeautifulSoup, CData, NavigableString, Tag
 from calibre.ebooks.metadata import MetaInformation
@@ -28,13 +28,13 @@ from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.date import now as nowf
 from calibre.utils.icu import numeric_sort_key
 from calibre.utils.img import add_borders_to_image, image_to_data, save_cover_data_to
-from calibre.utils.localization import canonicalize_lang
+from calibre.utils.localization import _, canonicalize_lang, ngettext
 from calibre.utils.logging import ThreadSafeWrapper
 from calibre.utils.threadpool import NoResultsPending, ThreadPool, WorkRequest
 from calibre.web import Recipe
 from calibre.web.feeds import Feed, feed_from_xml, feeds_from_index, templates
 from calibre.web.fetch.simple import (
-    AbortArticle, RecursiveFetcher, option_parser as web2disk_option_parser
+    AbortArticle, RecursiveFetcher, option_parser as web2disk_option_parser,
 )
 from calibre.web.fetch.utils import prepare_masthead_image
 from polyglot.builtins import string_or_bytes
@@ -103,8 +103,9 @@ class BasicNewsRecipe(Recipe):
     #: Number of levels of links to follow on article webpages
     recursions             = 0
 
-    #: Delay between consecutive downloads in seconds. The argument may be a
-    #: floating point number to indicate a more precise time.
+    #: The default delay between consecutive downloads in seconds. The argument may be a
+    #: floating point number to indicate a more precise time. See :meth:`get_url_specific_delay`
+    #: to implement per URL delays.
     delay                  = 0
 
     #: Publication type
@@ -335,7 +336,7 @@ class BasicNewsRecipe(Recipe):
     '''
 
     #: By default, calibre will use a default image for the masthead (Kindle only).
-    #: Override this in your recipe to provide a url to use as a masthead.
+    #: Override this in your recipe to provide a URL to use as a masthead.
     masthead_url = None
 
     #: By default, the cover image returned by get_cover_url() will be used as
@@ -413,7 +414,7 @@ class BasicNewsRecipe(Recipe):
     #: with the URL scheme of your particular website.
     resolve_internal_links = False
 
-    #: Set to False if you dont want to use gzipped transfers. Note that some old servers flake out with gzip
+    #: Set to False if you do not want to use gzipped transfers. Note that some old servers flake out with gzip
     handle_gzip = True
 
     # See the built-in recipes for examples of these settings.
@@ -473,6 +474,16 @@ class BasicNewsRecipe(Recipe):
         if self.test:
             return self.feeds[:self.test[0]]
         return self.feeds
+
+    def get_url_specific_delay(self, url):
+        '''
+        Return the delay in seconds before downloading this URL. If you want to programmatically
+        determine the delay for the specified URL, override this method in your subclass, returning
+        self.delay by default for URLs you do not want to affect.
+
+        :return: A floating point number, the delay in seconds.
+        '''
+        return self.delay
 
     @classmethod
     def print_version(cls, url):
@@ -717,9 +728,7 @@ class BasicNewsRecipe(Recipe):
                 _raw = self.encoding(_raw)
             else:
                 _raw = _raw.decode(self.encoding, 'replace')
-        from calibre.ebooks.chardet import (
-            strip_encoding_declarations, xml_to_unicode
-        )
+        from calibre.ebooks.chardet import strip_encoding_declarations, xml_to_unicode
         from calibre.utils.cleantext import clean_xml_chars
         if isinstance(_raw, str):
             _raw = strip_encoding_declarations(_raw)
@@ -727,7 +736,7 @@ class BasicNewsRecipe(Recipe):
             _raw = xml_to_unicode(_raw, strip_encoding_pats=True, resolve_entities=True)[0]
         _raw = clean_xml_chars(_raw)
         if save_raw:
-            with lopen(save_raw, 'wb') as f:
+            with open(save_raw, 'wb') as f:
                 f.write(_raw.encode('utf-8'))
         if as_tree:
             from html5_parser import parse
@@ -968,6 +977,7 @@ class BasicNewsRecipe(Recipe):
         self.web2disk_options.preprocess_image = self.preprocess_image
         self.web2disk_options.encoding = self.encoding
         self.web2disk_options.preprocess_raw_html = self.preprocess_raw_html_
+        self.web2disk_options.get_delay = self.get_url_specific_delay
 
         if self.delay > 0:
             self.simultaneous_downloads = 1
@@ -1713,8 +1723,9 @@ class BasicNewsRecipe(Recipe):
                 feed.description = as_unicode(err)
                 parsed_feeds.append(feed)
                 self.log.exception(msg)
-            if self.delay > 0:
-                time.sleep(self.delay)
+            delay = self.get_url_specific_delay(url)
+            if delay > 0:
+                time.sleep(delay)
 
         remove = [fl for fl in parsed_feeds if len(fl) == 0 and self.remove_empty_feeds]
         for f in remove:

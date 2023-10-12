@@ -7,37 +7,38 @@ import posixpath
 import sys
 import textwrap
 from collections import Counter, OrderedDict, defaultdict
-from functools import partial, lru_cache
-from gettext import pgettext
+from functools import lru_cache, partial
 from qt.core import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox, QFont,
     QFormLayout, QGridLayout, QIcon, QInputDialog, QItemSelectionModel, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QPainter, QPixmap, QRadioButton,
     QScrollArea, QSize, QSpinBox, QStyle, QStyledItemDelegate, Qt, QTimer, QTreeView,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal, sip
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal, sip,
 )
 
 from calibre import human_readable, sanitize_file_name
 from calibre.ebooks.oeb.base import OEB_DOCS, OEB_STYLES
-from calibre.ebooks.oeb.polish.utils import OEB_FONTS, guess_type
 from calibre.ebooks.oeb.polish.cover import (
-    get_cover_page_name, get_raster_cover_name, is_raster_image
+    get_cover_page_name, get_raster_cover_name, is_raster_image,
 )
 from calibre.ebooks.oeb.polish.css import add_stylesheet_links
 from calibre.ebooks.oeb.polish.replace import (
-    get_recommended_folders, get_spine_order_for_all_files
+    get_recommended_folders, get_spine_order_for_all_files,
 )
+from calibre.ebooks.oeb.polish.utils import OEB_FONTS, guess_type
 from calibre.gui2 import (
     choose_dir, choose_files, choose_save_file, elided_text, error_dialog,
-    make_view_use_window_background, question_dialog
+    make_view_use_window_background, question_dialog,
 )
 from calibre.gui2.tweak_book import (
-    CONTAINER_DND_MIMETYPE, current_container, editors, tprefs
+    CONTAINER_DND_MIMETYPE, current_container, editors, tprefs,
 )
 from calibre.gui2.tweak_book.editor import syntax_from_mime
 from calibre.gui2.tweak_book.templates import template_for
+from calibre.startup import connect_lambda
 from calibre.utils.fonts.utils import get_font_names
 from calibre.utils.icu import numeric_sort_key
+from calibre.utils.localization import ngettext, pgettext
 from calibre_extensions.progress_indicator import set_no_activate_on_click
 from polyglot.binary import as_hex_unicode
 from polyglot.builtins import iteritems
@@ -48,6 +49,7 @@ NAME_ROLE = Qt.ItemDataRole.UserRole
 CATEGORY_ROLE = NAME_ROLE + 1
 LINEAR_ROLE = CATEGORY_ROLE + 1
 MIME_ROLE = LINEAR_ROLE + 1
+TEMP_NAME_ROLE = MIME_ROLE + 1
 NBSP = '\xa0'
 
 
@@ -96,7 +98,7 @@ def get_bulk_rename_settings(parent, number, msg=None, sanitize=sanitize_file_na
     l.addRow(la)
     l.addRow(_('&Prefix:'), p)
     d.num = num = QSpinBox(d)
-    num.setMinimum(0), num.setValue(1), num.setMaximum(1000)
+    num.setMinimum(0), num.setValue(1), num.setMaximum(10000)
     l.addRow(_('Starting &number:'), num)
     if allow_spine_order:
         d.spine_order = QCheckBox(_('Rename files according to their book order'))
@@ -127,7 +129,7 @@ def get_bulk_rename_settings(parent, number, msg=None, sanitize=sanitize_file_na
 
 class ItemDelegate(QStyledItemDelegate):  # {{{
 
-    rename_requested = pyqtSignal(object, object)
+    rename_requested = pyqtSignal(object, object, object)
 
     def setEditorData(self, editor, index):
         name = str(index.data(NAME_ROLE) or '')
@@ -152,7 +154,7 @@ class ItemDelegate(QStyledItemDelegate):  # {{{
         newname = str(editor.text())
         oldname = str(index.data(NAME_ROLE) or '')
         if newname != oldname:
-            self.rename_requested.emit(oldname, newname)
+            self.rename_requested.emit(index, oldname, newname)
 
     def sizeHint(self, option, index):
         ans = QStyledItemDelegate.sizeHint(self, option, index)
@@ -244,13 +246,14 @@ class FileList(QTreeWidget, OpenWithHandler):
 
     def __init__(self, parent=None):
         QTreeWidget.__init__(self, parent)
+        self.pending_renames = {}
         make_view_use_window_background(self)
         self.categories = {}
         self.ordered_selected_indexes = False
         set_no_activate_on_click(self)
         self.current_edited_name = None
         self.delegate = ItemDelegate(self)
-        self.delegate.rename_requested.connect(self.rename_requested)
+        self.delegate.rename_requested.connect(self.possible_rename_requested, type=Qt.ConnectionType.QueuedConnection)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setItemDelegate(self.delegate)
         self.setIconSize(QSize(16, 16))
@@ -283,6 +286,39 @@ class FileList(QTreeWidget, OpenWithHandler):
                 'images':'view-image.png',
             })}
         self.itemActivated.connect(self.item_double_clicked)
+
+    def possible_rename_requested(self, index, old, new):
+        if old != new:
+            self.pending_renames[old] = new
+            QTimer.singleShot(10, self.dispatch_pending_renames)
+            item = self.itemFromIndex(index)
+            item.setData(0, TEMP_NAME_ROLE, item.text(0))
+            item.setText(0, new)
+
+    def restore_temp_names(self):
+        for item in self.all_files:
+            q = item.data(0, TEMP_NAME_ROLE)
+            if q:
+                item.setText(0, q)
+                item.setData(0, TEMP_NAME_ROLE, None)
+
+    def dispatch_pending_renames(self):
+        if self.pending_renames:
+            if self.state() != QAbstractItemView.State.EditingState:
+                pr, self.pending_renames = self.pending_renames, {}
+                if len(pr) == 1:
+                    old, new = tuple(pr.items())[0]
+                    self.rename_requested.emit(old, new)
+                else:
+                    ur = {}
+                    seen_vals = {c.data(0, NAME_ROLE) or '' for c in self.all_files}
+                    for k, v in pr.items():
+                        if v not in seen_vals:
+                            seen_vals.add(v)
+                            ur[k] = v
+                    self.bulk_rename_requested.emit(ur)
+            else:
+                QTimer.singleShot(10, self.dispatch_pending_renames)
 
     def mimeTypes(self):
         ans = QTreeWidget.mimeTypes(self)
@@ -339,6 +375,9 @@ class FileList(QTreeWidget, OpenWithHandler):
             return
         new_names = new_names[:insertion_point] + names + new_names[insertion_point:]
         order = [[name, linear_map[name]] for name in new_names]
+        self.request_reorder(order)
+
+    def request_reorder(self, order):
         # Ensure that all non-linear items are at the end, by making any non-linear
         # items not at the end, linear
         for i, (name, linear) in tuple(enumerate(order)):
@@ -383,24 +422,22 @@ class FileList(QTreeWidget, OpenWithHandler):
                     return c
 
     def select_name(self, name, set_as_current_index=False):
-        for parent in self.categories.values():
-            for c in (parent.child(i) for i in range(parent.childCount())):
-                q = str(c.data(0, NAME_ROLE) or '')
-                c.setSelected(q == name)
-                if q == name:
-                    self.scrollToItem(c)
-                    if set_as_current_index:
-                        self.setCurrentItem(c)
+        for c in self.all_files:
+            q = str(c.data(0, NAME_ROLE) or '')
+            c.setSelected(q == name)
+            if q == name:
+                self.scrollToItem(c)
+                if set_as_current_index:
+                    self.setCurrentItem(c)
 
     def select_names(self, names, current_name=None):
-        for parent in self.categories.values():
-            for c in (parent.child(i) for i in range(parent.childCount())):
-                q = str(c.data(0, NAME_ROLE) or '')
-                c.setSelected(q in names)
-                if q == current_name:
-                    self.scrollToItem(c)
-                    s = self.selectionModel()
-                    s.setCurrentIndex(self.indexFromItem(c), QItemSelectionModel.SelectionFlag.NoUpdate)
+        for c in self.all_files:
+            q = str(c.data(0, NAME_ROLE) or '')
+            c.setSelected(q in names)
+            if q == current_name:
+                self.scrollToItem(c)
+                s = self.selectionModel()
+                s.setCurrentIndex(self.indexFromItem(c), QItemSelectionModel.SelectionFlag.NoUpdate)
 
     def mark_name_as_current(self, name):
         current = self.item_from_name(name)
@@ -672,13 +709,15 @@ class FileList(QTreeWidget, OpenWithHandler):
                 m.addAction(QIcon.ic('default_cover.png'), _('Mark %s as cover image') % n, partial(self.mark_as_cover, cn))
             elif current_container().SUPPORTS_TITLEPAGES and mt in OEB_DOCS and cat == 'text':
                 m.addAction(QIcon.ic('default_cover.png'), _('Mark %s as cover page') % n, partial(self.mark_as_titlepage, cn))
+            if mt in OEB_DOCS and cat in ('text', 'misc') and current_container().opf_version_parsed.major > 2:
+                m.addAction(QIcon.ic('toc.png'), _('Mark %s as Table of Contents') % n, partial(self.mark_as_nav, cn))
             m.addSeparator()
 
         if num > 0:
             m.addSeparator()
             if num > 1:
                 m.addAction(QIcon.ic('modified.png'), _('&Bulk rename the selected files'), self.request_bulk_rename)
-            m.addAction(QIcon.ic('modified.png'), _('Change the file extension for the selected files'), self.request_change_ext)
+            m.addAction(QIcon.ic('modified.png'), _('Change the file extensions for the selected files'), self.request_change_ext)
             m.addAction(QIcon.ic('trash.png'), ngettext(
                 '&Delete the selected file', '&Delete the {} selected files', num).format(num), self.request_delete)
             m.addAction(QIcon.ic('edit-copy.png'), ngettext(
@@ -758,10 +797,24 @@ class FileList(QTreeWidget, OpenWithHandler):
             )
         self.mark_requested.emit(name, 'titlepage:%r' % move_to_start)
 
+    def mark_as_nav(self, name):
+        self.mark_requested.emit(name, 'nav')
+
     def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        k = ev.key()
+        mods = ev.modifiers() & (
+            Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+        if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             ev.accept()
             self.request_delete()
+        elif mods == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            m = self.categories['text'].childCount()
+            amt = {Qt.Key.Key_Up: -1, Qt.Key.Key_Down: 1, Qt.Key.Key_Home: -m, Qt.Key.Key_End: m}.get(k, None)
+            if amt is not None:
+                ev.accept()
+                self.move_selected_text_items(amt)
+            else:
+                return QTreeWidget.keyPressEvent(self, ev)
         else:
             return QTreeWidget.keyPressEvent(self, ev)
 
@@ -823,8 +876,47 @@ class FileList(QTreeWidget, OpenWithHandler):
         ans.discard('')
         return ans
 
+    @property
+    def selected_names_in_order(self):
+        root = self.invisibleRootItem()
+        for category_item in (root.child(i) for i in range(root.childCount())):
+            for child in (category_item.child(i) for i in range(category_item.childCount())):
+                if child.isSelected():
+                    name = child.data(0, NAME_ROLE)
+                    if name:
+                        yield name
+
+    def move_selected_text_items(self, amt: int) -> bool:
+        parent = self.categories['text']
+        children = tuple(parent.child(i) for i in range(parent.childCount()))
+        selected_names = tuple(c.data(0, NAME_ROLE) for c in children if c.isSelected())
+        if not selected_names or amt == 0:
+            return False
+        current_order = tuple(c.data(0, NAME_ROLE) for c in children)
+        linear_map = {c.data(0, NAME_ROLE):c.data(0, LINEAR_ROLE) for c in children}
+        order_map = {name: i for i, name in enumerate(current_order)}
+        new_order = list(current_order)
+        changed = False
+        items = reversed(selected_names) if amt > 0 else selected_names
+        if amt < 0:
+            items = selected_names
+            delta = max(amt, -order_map[selected_names[0]])
+        else:
+            items = reversed(selected_names)
+            delta = min(amt, len(children) - 1 - order_map[selected_names[-1]])
+        for name in items:
+            i = order_map[name]
+            new_i = min(max(0, i + delta), len(current_order) - 1)
+            if new_i != i:
+                changed = True
+                del new_order[i]
+                new_order.insert(new_i, name)
+        if changed:
+            self.request_reorder([[n, linear_map[n]] for n in new_order])
+        return changed
+
     def copy_selected_files(self):
-        self.initiate_file_copy.emit(self.selected_names)
+        self.initiate_file_copy.emit(tuple(self.selected_names_in_order))
 
     def paste_from_other_instance(self):
         self.initiate_file_paste.emit()
@@ -898,7 +990,7 @@ class FileList(QTreeWidget, OpenWithHandler):
             self._request_edit(item)
         else:
             error_dialog(self, _('Cannot edit'),
-                         _('No item with the name: %s was found') % name, show=True)
+                         _('No item with the name %s was found') % name, show=True)
 
     def edit_next_file(self, currently_editing=None, backwards=False):
         category = self.categories['text']
@@ -1168,6 +1260,9 @@ class FileListWidget(QWidget):
 
     def build(self, container, preserve_state=True):
         self.file_list.build(container, preserve_state=preserve_state)
+
+    def restore_temp_names(self):
+        self.file_list.restore_temp_names()
 
     @property
     def searchable_names(self):

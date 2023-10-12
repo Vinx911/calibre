@@ -4,15 +4,18 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import re
-import string
 import socket
+import string
 import time
 from functools import partial
+
 try:
     from queue import Empty, Queue
 except ImportError:
     from Queue import Empty, Queue
+
 from threading import Thread
+
 try:
     from urllib.parse import urlparse
 except ImportError:
@@ -24,9 +27,10 @@ from calibre import as_unicode, browser, random_user_agent, xml_replace_entities
 from calibre.ebooks.metadata import check_isbn
 from calibre.ebooks.metadata.book.base import Metadata
 from calibre.ebooks.metadata.sources.base import Option, Source, fixauthors, fixcase
+from calibre.ebooks.oeb.base import urlquote
+from calibre.utils.icu import lower as icu_lower
 from calibre.utils.localization import canonicalize_lang
 from calibre.utils.random_ua import accept_header_for_ua
-from calibre.ebooks.oeb.base import urlquote
 
 
 def sort_matches_preferring_kindle_editions(matches):
@@ -89,14 +93,16 @@ def parse_html(raw):
 
 
 def parse_details_page(url, log, timeout, browser, domain):
-    from calibre.utils.cleantext import clean_ascii_chars
-    from calibre.ebooks.chardet import xml_to_unicode
     from lxml.html import tostring
+
+    from calibre.ebooks.chardet import xml_to_unicode
+    from calibre.utils.cleantext import clean_ascii_chars
     try:
         from calibre.ebooks.metadata.sources.update import search_engines_module
         get_data_for_cached_url = search_engines_module().get_data_for_cached_url
     except Exception:
-        get_data_for_cached_url = lambda *a: None
+        def get_data_for_cached_url(*a):
+            return None
     raw = get_data_for_cached_url(url)
     if raw:
         log('Using cached details for url:', url)
@@ -226,7 +232,9 @@ class Worker(Thread):  # Get details {{{
                 7: ['juil'],
                 8: ['août'],
                 9: ['sept'],
-                12: ['déc'],
+                10: ['oct', 'octobre'],
+                11: ['nov', 'novembre'],
+                12: ['déc', 'décembre'],
             },
             'br': {
                 1: ['janeiro'],
@@ -323,7 +331,7 @@ class Worker(Thread):  # Get details {{{
                     starts-with(text(), "Audible.com Release Date:")]
         '''
         self.publisher_names = {'Publisher', 'Uitgever', 'Verlag', 'Utgivare', 'Herausgeber',
-                                'Editore', 'Editeur', 'Editor', 'Editora', '出版社'}
+                                'Editore', 'Editeur', 'Éditeur', 'Editor', 'Editora', '出版社'}
 
         self.language_xpath =    '''
             descendant::*[
@@ -578,6 +586,9 @@ class Worker(Thread):  # Get details {{{
             span = root.xpath('//*[@id="ebooksTitle"]')
             if span:
                 return sanitize_title(self.totext(span[0]))
+            h1 = root.xpath('//h1[@data-feature-name="title"]')
+            if h1:
+                return sanitize_title(self.totext(h1[0]))
             raise ValueError('No title block found')
         tdiv = tdiv[0]
         actual_title = tdiv.xpath('descendant::*[@id="btAsinTitle"]')
@@ -596,6 +607,7 @@ class Worker(Thread):  # Get details {{{
                 '#bylineInfo .author .contributorNameID',
                 '#bylineInfo .author a.a-link-normal',
                 '#bylineInfo #bylineContributor',
+                '#bylineInfo #contributorLink',
         ):
             matches = tuple(self.selector(sel))
             if matches:
@@ -682,6 +694,10 @@ class Worker(Thread):  # Get details {{{
         for a in desc.xpath('descendant::a[@href]'):
             del a.attrib['href']
             a.tag = 'span'
+        for a in desc.xpath('descendant::span[@class="a-text-italic"]'):
+            a.tag = 'i'
+        for a in desc.xpath('descendant::span[@class="a-text-bold"]'):
+            a.tag = 'b'
         desc = self.tostring(desc, method='html', encoding='unicode').strip()
         desc = xml_replace_entities(desc, 'utf-8')
 
@@ -705,25 +721,37 @@ class Worker(Thread):  # Get details {{{
         except ImportError:
             from urllib import unquote
         ans = ''
-        ns = tuple(self.selector('#bookDescription_feature_div noscript'))
-        if ns:
-            ns = ns[0]
-            if len(ns) == 0 and ns.text:
-                import html5lib
-                # html5lib parsed noscript as CDATA
-                ns = html5lib.parseFragment(
-                    '<div>%s</div>' % (ns.text), treebuilder='lxml', namespaceHTMLElements=False)[0]
-            else:
-                ns.tag = 'div'
-            ans = self._render_comments(ns)
+        ovr = tuple(self.selector('#drengr_MobileTabbedDescriptionOverviewContent_feature_div'))
+        if ovr:
+            ovr = ovr[0]
+            ovr.tag = 'div'
+            ans = self._render_comments(ovr)
+            ovr = tuple(self.selector('#drengr_MobileTabbedDescriptionEditorialsContent_feature_div'))
+            if ovr:
+                ovr = ovr[0]
+                ovr.tag = 'div'
+                ans += self._render_comments(ovr)
         else:
-            desc = root.xpath('//div[@id="ps-content"]/div[@class="content"]')
-            if desc:
-                ans = self._render_comments(desc[0])
+            ns = tuple(self.selector('#bookDescription_feature_div noscript'))
+            if ns:
+                ns = ns[0]
+                if len(ns) == 0 and ns.text:
+                    import html5lib
+
+                    # html5lib parsed noscript as CDATA
+                    ns = html5lib.parseFragment(
+                        '<div>%s</div>' % (ns.text), treebuilder='lxml', namespaceHTMLElements=False)[0]
+                else:
+                    ns.tag = 'div'
+                ans = self._render_comments(ns)
             else:
-                ns = tuple(self.selector('#bookDescription_feature_div .a-expander-content'))
-                if ns:
-                    ans = self._render_comments(ns[0])
+                desc = root.xpath('//div[@id="ps-content"]/div[@class="content"]')
+                if desc:
+                    ans = self._render_comments(desc[0])
+                else:
+                    ns = tuple(self.selector('#bookDescription_feature_div .a-expander-content'))
+                    if ns:
+                        ans = self._render_comments(ns[0])
 
         desc = root.xpath(
             '//div[@id="productDescription"]/*[@class="content"]')
@@ -933,10 +961,11 @@ class Worker(Thread):  # Get details {{{
     def parse_detail_cells(self, mi, c1, c2):
         name = self.totext(c1, only_printable=True).strip().strip(':').strip()
         val = self.totext(c2).strip()
+        val = val.replace('\u200e', '').replace('\u200f', '')
         if not val:
             return
         if name in self.language_names:
-            ans = self.lang_map.get(val, None)
+            ans = self.lang_map.get(val)
             if not ans:
                 ans = canonicalize_lang(val)
             if ans:
@@ -1015,7 +1044,7 @@ class Worker(Thread):  # Get details {{{
 class Amazon(Source):
 
     name = 'Amazon.com'
-    version = (1, 3, 1)
+    version = (1, 3, 5)
     minimum_calibre_version = (2, 82, 0)
     description = _('Downloads metadata and covers from Amazon')
 
@@ -1254,9 +1283,9 @@ class Amazon(Source):
     def create_query(self, log, title=None, authors=None, identifiers={},  # {{{
                      domain=None, for_amazon=True):
         try:
-            from urllib.parse import urlencode, unquote_plus
+            from urllib.parse import unquote_plus, urlencode
         except ImportError:
-            from urllib import urlencode, unquote_plus
+            from urllib import unquote_plus, urlencode
         if domain is None:
             domain = self.domain
 
@@ -1305,7 +1334,8 @@ class Amazon(Source):
         if not ('field-keywords' in q or 'field-isbn' in q or
                 ('field-title' in q)):
             # Insufficient metadata to make an identify query
-            return None, None
+            log.error('Insufficient metadata to construct query, none of title, ISBN or ASIN supplied')
+            raise SearchFailed()
 
         if not for_amazon:
             return terms, domain
@@ -1424,14 +1454,11 @@ class Amazon(Source):
     # }}}
 
     def search_amazon(self, br, testing, log, abort, title, authors, identifiers, timeout):  # {{{
-        from calibre.utils.cleantext import clean_ascii_chars
         from calibre.ebooks.chardet import xml_to_unicode
+        from calibre.utils.cleantext import clean_ascii_chars
         matches = []
         query, domain = self.create_query(log, title=title, authors=authors,
                                           identifiers=identifiers)
-        if query is None:
-            log.error('Insufficient metadata to construct query')
-            raise SearchFailed()
         try:
             raw = br.open_novisit(query, timeout=timeout).read().strip()
         except Exception as e:
@@ -1688,8 +1715,10 @@ class Amazon(Source):
 def manual_tests(domain, **kw):  # {{{
     # To run these test use:
     # calibre-debug -c "from calibre.ebooks.metadata.sources.amazon import *; manual_tests('com')"
-    from calibre.ebooks.metadata.sources.test import (test_identify_plugin,
-                                                      isbn_test, title_test, authors_test, comments_test, series_test)
+    from calibre.ebooks.metadata.sources.test import (
+        authors_test, comments_test, isbn_test, series_test, test_identify_plugin,
+        title_test,
+    )
     all_tests = {}
     all_tests['com'] = [  # {{{
         (   # Paperback with series

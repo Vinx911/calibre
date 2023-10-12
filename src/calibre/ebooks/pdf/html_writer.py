@@ -2,8 +2,6 @@
 # License: GPL v3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
 
 # Imports {{{
-
-
 import copy
 import json
 import os
@@ -12,31 +10,25 @@ import sys
 from collections import namedtuple
 from functools import lru_cache
 from html5_parser import parse
-from io import BytesIO
 from itertools import count, repeat
 from qt.core import (
     QApplication, QByteArray, QMarginsF, QObject, QPageLayout, Qt, QTimer, QUrl,
-    pyqtSignal, sip
+    pyqtSignal, sip,
 )
 from qt.webengine import (
     QWebEnginePage, QWebEngineProfile, QWebEngineSettings,
     QWebEngineUrlRequestInterceptor, QWebEngineUrlRequestJob,
-    QWebEngineUrlSchemeHandler
+    QWebEngineUrlSchemeHandler,
 )
 
 from calibre import detect_ncpus, human_readable, prepare_string_for_xml
-from calibre.constants import (
-    FAKE_HOST, FAKE_PROTOCOL, __version__, ismacos, iswindows
-)
+from calibre.constants import FAKE_HOST, FAKE_PROTOCOL, __version__, ismacos, iswindows, __appname__
 from calibre.ebooks.metadata.xmp import metadata_to_xmp_packet
 from calibre.ebooks.oeb.base import XHTML, XPath
 from calibre.ebooks.oeb.polish.container import Container as ContainerBase
 from calibre.ebooks.oeb.polish.toc import get_toc
 from calibre.ebooks.oeb.polish.utils import guess_type
-from calibre.ebooks.pdf.image_writer import (
-    Image, PDFMetadata, draw_image_page, get_page_layout
-)
-from calibre.ebooks.pdf.render.serialize import PDFStream
+from calibre.ebooks.pdf.image_writer import PDFMetadata, get_page_layout
 from calibre.gui2 import setup_unix_signals
 from calibre.srv.render_book import check_for_maths
 from calibre.utils.fonts.sfnt.container import Sfnt, UnsupportedFont
@@ -46,8 +38,10 @@ from calibre.utils.fonts.sfnt.subset import pdf_subset
 from calibre.utils.logging import default_log
 from calibre.utils.monotonic import monotonic
 from calibre.utils.podofo import (
-    dedup_type3_fonts, get_podofo, remove_unused_fonts, set_metadata_implementation
+    add_image_page, dedup_type3_fonts, get_podofo, remove_unused_fonts,
+    set_metadata_implementation,
 )
+from calibre.utils.resources import get_path as P
 from calibre.utils.short_uuid import uuid4
 from calibre.utils.webengine import secure_webengine, send_reply, setup_profile
 from polyglot.builtins import as_bytes, iteritems
@@ -327,6 +321,7 @@ class Renderer(QWebEnginePage):
         url = QUrl(f'{FAKE_PROTOCOL}://{FAKE_HOST}/')
         url.setPath(path)
         self.setUrl(url)
+        self.job_started_at = monotonic()
 
 
 class RequestInterceptor(QWebEngineUrlRequestInterceptor):
@@ -399,9 +394,12 @@ class RenderManager(QObject):
 
     def convert_html_files(self, jobs, settle_time=0, wait_for_title=None, has_maths=None):
         self.has_maths = has_maths or {}
+        self.render_count = 0
+        self.total_count = len(jobs)
         while len(self.workers) < min(len(jobs), self.max_workers):
             self.create_worker()
         self.pending = list(jobs)
+        self.log(f'Rendering {len(self.pending)} HTML files')
         self.results = {}
         self.settle_time = settle_time
         self.wait_for_title = wait_for_title
@@ -442,6 +440,12 @@ class RenderManager(QObject):
 
     def work_done(self, worker, result):
         self.results[worker.result_key] = result
+        for w in self.workers:
+            if not w.working and w.job_started_at > 0:
+                time_taken = monotonic() - w.job_started_at
+                self.render_count += 1
+                self.log.debug(f'Rendered: {worker.result_key} in {time_taken:.1f} seconds ({self.render_count}/{self.total_count})')
+                w.job_started_at = 0
         if self.pending:
             self.assign_work()
         else:
@@ -483,15 +487,8 @@ def update_metadata(pdf_doc, pdf_metadata):
 
 
 def add_cover(pdf_doc, cover_data, page_layout, opts):
-    buf = BytesIO()
-    page_size = page_layout.fullRectPoints().size()
-    img = Image(cover_data)
-    writer = PDFStream(buf, (page_size.width(), page_size.height()), compress=True)
-    writer.apply_fill(color=(1, 1, 1))
-    draw_image_page(writer, img, preserve_aspect_ratio=opts.preserve_cover_aspect_ratio)
-    writer.end()
-    cover_pdf_doc = data_as_pdf_doc(buf.getvalue())
-    pdf_doc.insert_existing_page(cover_pdf_doc)
+    r = page_layout.fullRect(QPageLayout.Unit.Point)
+    add_image_page(pdf_doc, cover_data, page_size=(r.left(), r.top(), r.width(), r.height()), preserve_aspect_ratio=opts.preserve_cover_aspect_ratio)
 # }}}
 
 
@@ -911,7 +908,7 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
     report_progress(0.8, _('Adding headers and footers'))
     name = create_skeleton(container)
     root = container.parsed(name)
-    reset_css = 'margin: 0; padding: 0; border-width: 0; background-color: unset;'
+    reset_css = 'margin: 0; padding: 0; border-width: 0; background-color: unset; column-count: unset; column-width: unset;'
     root.set('style', reset_css)
     body = last_tag(root)
     body.attrib.pop('id', None)
@@ -1137,7 +1134,8 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
     results = manager.convert_html_files(jobs, settle_time=1, has_maths=has_maths)
     num_pages = 0
     page_margins_map = []
-    for margin_file in margin_files:
+    all_docs = []
+    for i, margin_file in enumerate(margin_files):
         name = margin_file.name
         data = results[name]
         if not isinstance(data, bytes):
@@ -1147,11 +1145,10 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
         doc_pages = doc.page_count()
         page_margins_map.extend(repeat(resolve_margins(margin_file.margins, page_layout), doc_pages))
         num_pages += doc_pages
+        all_docs.append(doc)
 
-        if pdf_doc is None:
-            pdf_doc = doc
-        else:
-            pdf_doc.append(doc)
+    pdf_doc = all_docs[0]
+    pdf_doc.append(*all_docs[1:])
 
     page_number_display_map = get_page_number_display_map(manager, opts, num_pages, log)
 
@@ -1209,6 +1206,7 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
 
     if metadata is not None:
         update_metadata(pdf_doc, pdf_metadata)
+    pdf_doc.creator = pdf_doc.producer = __appname__ + ' ' + __version__
     report_progress(1, _('Updated metadata in PDF'))
 
     if opts.uncompressed_pdf:

@@ -5,7 +5,7 @@ from functools import lru_cache
 import sys, locale, codecs, os, collections, collections.abc
 
 __appname__   = 'calibre'
-numeric_version = (6, 3, 0)
+numeric_version = (6, 28, 1)
 __version__   = '.'.join(map(str, numeric_version))
 git_version   = None
 __author__    = "Kovid Goyal <kovid@kovidgoyal.net>"
@@ -24,7 +24,7 @@ isnetbsd = 'netbsd' in _plat
 isdragonflybsd = 'dragonfly' in _plat
 isbsd = isfreebsd or isnetbsd or isdragonflybsd
 ishaiku = 'haiku1' in _plat
-islinux   = not(iswindows or ismacos or isbsd or ishaiku)
+islinux   = not (iswindows or ismacos or isbsd or ishaiku)
 isfrozen  = hasattr(sys, 'frozen')
 isunix = ismacos or islinux or ishaiku
 isportable = hasenv('CALIBRE_PORTABLE_BUILD')
@@ -60,7 +60,7 @@ builtin_colors_light = {
     'purple': '#d9b2ff',
 }
 builtin_colors_dark = {
-    'yellow': '#c18d18',
+    'yellow': '#906e00',
     'green': '#306f50',
     'blue': '#265589',
     'red': '#a23e5a',
@@ -269,7 +269,7 @@ class ExtensionsImporter:
             'uchardet',
         )
         if iswindows:
-            extra = ('winutil', 'wpd', 'winfonts', 'winsapi')
+            extra = ('winutil', 'wpd', 'winfonts', 'winsapi', 'winspeech')
         elif ismacos:
             extra = ('usbobserver', 'cocoa', 'libusb', 'libmtp')
         elif isfreebsd or ishaiku or islinux:

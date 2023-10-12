@@ -7,14 +7,14 @@ import errno
 import os
 import shutil
 import time
+from contextlib import closing, suppress
 from math import ceil
-from contextlib import suppress, closing
 
 from calibre import force_unicode, isbytestring, prints, sanitize_file_name
 from calibre.constants import (
-    filesystem_encoding, iswindows, preferred_encoding, ismacos
+    filesystem_encoding, ismacos, iswindows, preferred_encoding,
 )
-from calibre.utils.localization import get_udc
+from calibre.utils.localization import _, get_udc
 from polyglot.builtins import iteritems, itervalues
 
 
@@ -197,7 +197,7 @@ def case_preserving_open_file(path, mode='wb', mkdir_mode=0o777):
         ans = fpath = cpath
     else:
         fname = components[-1]
-        ans = lopen(os.path.join(cpath, fname), mode)
+        ans = open(os.path.join(cpath, fname), mode)
         # Ensure file and all its metadata is written to disk so that subsequent
         # listdir() has file name in it. I don't know if this is actually
         # necessary, but given the diversity of platforms, best to be safe.
@@ -331,6 +331,7 @@ class WindowsAtomicFolderMove:
 
     def __init__(self, path):
         from collections import defaultdict
+
         from calibre_extensions import winutil
         self.handle_map = {}
 
@@ -407,7 +408,7 @@ class WindowsAtomicFolderMove:
             return
 
         winutil.set_file_pointer(handle, 0, winutil.FILE_BEGIN)
-        with lopen(dest, 'wb') as f:
+        with open(dest, 'wb') as f:
             sz = 1024 * 1024
             while True:
                 raw = winutil.read_file(handle, sz)
@@ -441,6 +442,7 @@ class WindowsAtomicFolderMove:
 
 
 def hardlink_file(src, dest):
+    src, dest = make_long_path_useable(src), make_long_path_useable(dest)
     if iswindows:
         windows_hardlink(src, dest)
         return
@@ -600,8 +602,8 @@ rmtree = shutil.rmtree
 if iswindows:
     long_path_prefix = '\\\\?\\'
 
-    def make_long_path_useable(path):
-        if len(path) > 200 and os.path.isabs(path) and not path.startswith(long_path_prefix):
+    def make_long_path_useable(path, threshold=200):
+        if len(path) > threshold and os.path.isabs(path) and not path.startswith(long_path_prefix):
             path = long_path_prefix + os.path.normpath(path)
         return path
 
@@ -619,8 +621,26 @@ if iswindows:
             return False
         # Values I have seen: FAT32, exFAT, NTFS
         return tn.upper().startswith('FAT')
+
+    def get_long_path_name(path):
+        from calibre_extensions.winutil import get_long_path_name
+        lpath = path
+        if os.path.isabs(lpath) and not lpath.startswith(long_path_prefix):
+            lpath = long_path_prefix + lpath
+        try:
+            return get_long_path_name(lpath)
+        except FileNotFoundError:
+            return path
+        except OSError as e:
+            if e.winerror == 123: # ERR_INVALID_NAME
+                return path
+            raise
+
 else:
-    def make_long_path_useable(path):
+    def make_long_path_useable(path, threshold=200):
+        return path
+
+    def get_long_path_name(path):
         return path
 
     def is_fat_filesystem(path):

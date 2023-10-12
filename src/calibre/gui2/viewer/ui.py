@@ -10,8 +10,8 @@ from collections import defaultdict, namedtuple
 from hashlib import sha256
 from qt.core import (
     QApplication, QCursor, QDockWidget, QEvent, QMainWindow, QMenu, QMimeData,
-    QModelIndex, QPixmap, Qt, QTimer, QToolBar, QUrl, QVBoxLayout, QWidget,
-    pyqtSignal, sip
+    QModelIndex, QPixmap, Qt, QTimer, QToolBar, QUrl, QVBoxLayout, QWidget, pyqtSignal,
+    sip,
 )
 from threading import Thread
 
@@ -20,23 +20,23 @@ from calibre.constants import ismacos, iswindows
 from calibre.customize.ui import available_input_formats
 from calibre.db.annotations import merge_annotations
 from calibre.gui2 import (
-    add_to_recent_docs, choose_files, error_dialog, sanitize_env_vars
+    add_to_recent_docs, choose_files, error_dialog, sanitize_env_vars,
 )
 from calibre.gui2.dialogs.drm_error import DRMErrorMessage
 from calibre.gui2.image_popup import ImagePopup
 from calibre.gui2.main_window import MainWindow
 from calibre.gui2.viewer import get_current_book_data, performance_monitor
 from calibre.gui2.viewer.annotations import (
-    AnnotationsSaveWorker, annotations_dir, parse_annotations
+    AnnotationsSaveWorker, annotations_dir, parse_annotations,
 )
 from calibre.gui2.viewer.bookmarks import BookmarkManager
 from calibre.gui2.viewer.config import (
-    get_session_pref, load_reading_rates, save_reading_rates, vprefs
+    get_session_pref, load_reading_rates, save_reading_rates, vprefs,
 )
 from calibre.gui2.viewer.convert_book import clean_running_workers, prepare_book
 from calibre.gui2.viewer.highlights import HighlightsPanel
 from calibre.gui2.viewer.integration import (
-    get_book_library_details, load_annotations_map_from_library
+    get_book_library_details, load_annotations_map_from_library,
 )
 from calibre.gui2.viewer.lookup import Lookup
 from calibre.gui2.viewer.overlay import LoadingOverlay
@@ -44,9 +44,11 @@ from calibre.gui2.viewer.search import SearchPanel
 from calibre.gui2.viewer.toc import TOC, TOCSearch, TOCView
 from calibre.gui2.viewer.toolbars import ActionsToolBar
 from calibre.gui2.viewer.web_view import WebView, get_path_for_name, set_book_path
+from calibre.startup import connect_lambda
 from calibre.utils.date import utcnow
 from calibre.utils.img import image_from_path
 from calibre.utils.ipc.simple_worker import WorkerError
+from calibre.utils.localization import _
 from polyglot.builtins import as_bytes, as_unicode, iteritems, itervalues
 
 
@@ -334,6 +336,9 @@ class EbookViewer(MainWindow):
     def start_search(self, search_query):
         name = self.web_view.current_content_file
         if name:
+            if search_query.is_empty and search_query.text:
+                return error_dialog(self, _('Empty search expression'), _(
+                    'Cannot search for {!r} as it contains only punctuation and spaces.').format(search_query.text), show=True)
             self.web_view.get_current_cfi(self.search_widget.set_anchor_cfi)
             self.search_widget.start_search(search_query, name)
             self.web_view.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -755,14 +760,11 @@ class EbookViewer(MainWindow):
     def save_state(self):
         with vprefs:
             vprefs['main_window_state'] = bytearray(self.saveState(self.MAIN_WINDOW_STATE_VERSION))
-            vprefs['main_window_geometry'] = bytearray(self.saveGeometry())
+            self.save_geometry(vprefs, 'main_window_geometry')
 
     def restore_state(self):
         state = vprefs['main_window_state']
-        geom = vprefs['main_window_geometry']
-        if geom and get_session_pref('remember_window_geometry', default=False):
-            QApplication.instance().safe_restore_geometry(self, geom)
-        else:
+        if not get_session_pref('remember_window_geometry', default=False) or not self.restore_geometry(vprefs, 'main_window_geometry'):
             QApplication.instance().ensure_window_on_screen(self)
         if state:
             self.restoreState(state, self.MAIN_WINDOW_STATE_VERSION)

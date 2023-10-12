@@ -18,6 +18,7 @@ import time
 import unittest
 
 from calibre.constants import islinux, ismacos, iswindows, plugins_loc
+from calibre.utils.resources import get_image_path as I, get_path as P
 from polyglot.builtins import iteritems
 
 is_ci = os.environ.get('CI', '').lower() == 'true'
@@ -95,6 +96,12 @@ class BuildTest(unittest.TestCase):
         import lzma
         lzma.open
 
+    def test_zstd(self):
+        from pyzstd import compress, decompress
+        data = os.urandom(4096)
+        cdata = compress(data)
+        self.assertEqual(data, decompress(cdata))
+
     def test_html5lib(self):
         import html5lib.html5parser  # noqa
         from html5lib import parse  # noqa
@@ -128,8 +135,8 @@ class BuildTest(unittest.TestCase):
             # libusb fails to initialize in containers without USB subsystems
             exclusions.update(set('libusb libmtp'.split()))
         from importlib import import_module
-        from importlib.resources import contents
-        for name in contents('calibre_extensions'):
+        from importlib.resources import files
+        for name in (path.name for path in files('calibre_extensions').iterdir()):
             if name in exclusions:
                 if name in ('libusb', 'libmtp'):
                     # Just check that the DLL can be loaded
@@ -150,6 +157,10 @@ class BuildTest(unittest.TestCase):
     def test_certgen(self):
         from calibre.utils.certgen import create_key_pair
         create_key_pair()
+
+    def test_fonttools(self):
+        from fontTools.subset import main
+        main
 
     def test_msgpack(self):
         from calibre.utils.date import utcnow
@@ -304,7 +315,8 @@ class BuildTest(unittest.TestCase):
         if is_sanitized:
             raise unittest.SkipTest('Skipping Qt build test as sanitizer is enabled')
         from qt.core import (
-            QApplication, QFontDatabase, QImageReader, QNetworkAccessManager, QTimer, QSslSocket
+            QApplication, QFontDatabase, QImageReader, QNetworkAccessManager,
+            QSslSocket, QTimer,
         )
         from qt.webengine import QWebEnginePage
 
@@ -389,12 +401,28 @@ class BuildTest(unittest.TestCase):
         except ImportError:
             from PIL import _imaging, _imagingft, _imagingmath
         _imaging, _imagingmath, _imagingft
+        from PIL import features
+        from io import StringIO
+        out = StringIO()
+        features.pilinfo(out=out, supported_formats=False)
+        out = out.getvalue()
+        for line in '''\
+        --- PIL CORE support ok
+        --- FREETYPE2 support ok
+        --- WEBP support ok
+        --- WEBP Transparency support ok
+        --- WEBPMUX support ok
+        --- WEBP Animation support ok
+        --- JPEG support ok
+        --- ZLIB (PNG/ZIP) support ok
+        '''.splitlines():
+            self.assertIn(line.strip(), out)
         i = Image.open(I('lt.png', allow_user_override=False))
         self.assertGreaterEqual(i.size, (20, 20))
         i = Image.open(P('catalog/DefaultCover.jpg', allow_user_override=False))
         self.assertGreaterEqual(i.size, (20, 20))
 
-    @unittest.skipUnless(iswindows and not is_ci, 'File dialog helper only used on windows (non-continuous-itegration)')
+    @unittest.skipUnless(iswindows and not is_ci, 'File dialog helper only used on windows (non-continuous-integration)')
     def test_file_dialog_helper(self):
         from calibre.gui2.win_file_dialogs import test
         test()

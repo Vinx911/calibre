@@ -3,20 +3,22 @@ __copyright__ = '2009, John Schember <john@nachtimwald.com>'
 __docformat__ = 'restructuredtext en'
 
 import shutil
+from qt.core import QDialog, QDialogButtonBox, QModelIndex
 
-from qt.core import QModelIndex, QDialog, QApplication, QDialogButtonBox
-
-from calibre.gui2.convert.single import Config, GroupModel, gprefs
-from calibre.gui2.convert.look_and_feel import LookAndFeelWidget
+from calibre.ebooks.conversion.config import (
+    get_output_formats, sort_formats_by_preference,
+)
+from calibre.ebooks.conversion.plumber import Plumber
+from calibre.gui2.convert import GuiRecommendations
 from calibre.gui2.convert.heuristics import HeuristicsWidget
-from calibre.gui2.convert.search_and_replace import SearchAndReplaceWidget
+from calibre.gui2.convert.look_and_feel import LookAndFeelWidget
 from calibre.gui2.convert.page_setup import PageSetupWidget
+from calibre.gui2.convert.search_and_replace import SearchAndReplaceWidget
+from calibre.gui2.convert.single import Config, GroupModel, gprefs
 from calibre.gui2.convert.structure_detection import StructureDetectionWidget
 from calibre.gui2.convert.toc import TOCWidget
-from calibre.gui2.convert import GuiRecommendations
-from calibre.ebooks.conversion.plumber import Plumber
-from calibre.ebooks.conversion.config import sort_formats_by_preference, get_output_formats
 from calibre.utils.config import prefs
+from calibre.utils.localization import ngettext
 from calibre.utils.logging import Log
 
 
@@ -61,11 +63,7 @@ class BulkConfig(Config):
                 'settings.'))
             o.setChecked(False)
 
-        geom = gprefs.get('convert_bulk_dialog_geom', None)
-        if geom:
-            QApplication.instance().safe_restore_geometry(self, geom)
-        else:
-            self.resize(self.sizeHint())
+        self.restore_geometry(gprefs, 'convert_bulk_dialog_geom')
 
     def setup_pipeline(self, *args):
         oidx = self.groups.currentIndex().row()
@@ -140,6 +138,5 @@ class BulkConfig(Config):
 
     def done(self, r):
         if self.isVisible():
-            gprefs['convert_bulk_dialog_geom'] = \
-                bytearray(self.saveGeometry())
+            self.save_geometry(gprefs, 'convert_bulk_dialog_geom')
         return QDialog.done(self, r)

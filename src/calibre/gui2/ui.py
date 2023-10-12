@@ -20,19 +20,20 @@ from collections import OrderedDict, deque
 from io import BytesIO
 from qt.core import (
     QAction, QApplication, QDialog, QFont, QIcon, QMenu, QSystemTrayIcon, Qt, QTimer,
-    QUrl, pyqtSignal
+    QUrl, pyqtSignal,
 )
 
 from calibre import detect_ncpus, force_unicode, prints
 from calibre.constants import (
-    DEBUG, __appname__, config_dir, filesystem_encoding, ismacos, iswindows
+    DEBUG, __appname__, config_dir, filesystem_encoding, ismacos, iswindows,
 )
 from calibre.customize import PluginInstallationType
 from calibre.customize.ui import available_store_plugins, interface_actions
 from calibre.db.legacy import LibraryDatabase
+from calibre.gui2.extra_files_watcher import ExtraFilesWatcher
 from calibre.gui2 import (
     Dispatcher, GetMetadata, config, error_dialog, gprefs, info_dialog,
-    max_available_height, open_url, question_dialog, warning_dialog
+    max_available_height, open_url, question_dialog, warning_dialog,
 )
 from calibre.gui2.auto_add import AutoAdder
 from calibre.gui2.changes import handle_changes
@@ -59,6 +60,7 @@ from calibre.library import current_library_name
 from calibre.srv.library_broker import GuiLibraryBroker, db_matches
 from calibre.utils.config import dynamic, prefs
 from calibre.utils.ipc.pool import Pool
+from calibre.utils.resources import get_image_path as I, get_path as P
 from polyglot.builtins import string_or_bytes
 from polyglot.queue import Empty, Queue
 
@@ -77,12 +79,12 @@ def add_quick_start_guide(library_view, refresh_cover_browser=None):
     gprefs['quick_start_guide_added'] = True
     imgbuf = BytesIO(calibre_cover2(_('Quick Start Guide'), ''))
     try:
-        with lopen(P('quick_start/%s.epub' % l), 'rb') as src:
+        with open(P('quick_start/%s.epub' % l), 'rb') as src:
             buf = BytesIO(src.read())
     except OSError as err:
         if err.errno != errno.ENOENT:
             raise
-        with lopen(P('quick_start/eng.epub'), 'rb') as src:
+        with open(P('quick_start/eng.epub'), 'rb') as src:
             buf = BytesIO(src.read())
     safe_replace(buf, 'images/cover.jpg', imgbuf)
     buf.seek(0)
@@ -117,6 +119,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
     def __init__(self, opts, parent=None, gui_debug=None):
         MainWindow.__init__(self, opts, parent=parent, disable_automatic_gc=True)
         self.setWindowIcon(QApplication.instance().windowIcon())
+        self.extra_files_watcher = ExtraFilesWatcher(self)
         self.jobs_pointer = Pointer(self)
         self.proceed_requested.connect(self.do_proceed,
                 type=Qt.ConnectionType.QueuedConnection)
@@ -434,6 +437,9 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         # layout button. We need to let a book be selected in the book list
         # before initializing quickview, so run it after an event loop tick
         QTimer.singleShot(0, self.start_quickview)
+        # Force repaint of the book details splitter because it otherwise ends
+        # up with the wrong size. I don't know why.
+        QTimer.singleShot(0, self.bd_splitter.repaint)
 
     def start_quickview(self):
         from calibre.gui2.actions.show_quickview import get_quickview_action_plugin
@@ -622,7 +628,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         self.tags_view.recount()
 
     def handle_cli_args(self, args):
-        from urllib.parse import unquote, urlparse, parse_qs
+        from urllib.parse import parse_qs, unquote, urlparse
         if isinstance(args, string_or_bytes):
             args = [args]
         files, urls = [], []
@@ -671,11 +677,38 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 return bytes.fromhex(x[6:]).decode('utf-8')
             return x
 
+        def get_virtual_library(query):
+            vl = None
+            if query.get('encoded_virtual_library'):
+                vl = bytes.fromhex(query.get('encoded_virtual_library')[0]).decode('utf-8')
+            elif query.get('virtual_library'):
+                vl = query.get('virtual_library')[0]
+            if vl == '-':
+                vl = None
+            return vl
+
         if action == 'switch-library':
             library_id = decode_library_id(posixpath.basename(path))
             library_path = self.library_broker.path_for_library_id(library_id)
             if not db_matches(self.current_db, library_id, library_path):
                 self.library_moved(library_path)
+        elif action == 'book-details':
+            parts = tuple(filter(None, path.split('/')))
+            if len(parts) != 2:
+                return
+            library_id, book_id = parts
+            library_id = decode_library_id(library_id)
+            library_path = self.library_broker.path_for_library_id(library_id)
+            if library_path is None:
+                prints('Ignoring unknown library id', library_id, file=sys.stderr)
+                return
+            try:
+                book_id = int(book_id)
+            except Exception:
+                prints('Ignoring invalid book id', book_id, file=sys.stderr)
+                return
+            details = self.iactions['Show Book Details']
+            details.show_book_info(library_id=library_id, library_path=library_path, book_id=book_id)
         elif action == 'show-book':
             parts = tuple(filter(None, path.split('/')))
             if len(parts) != 2:
@@ -690,9 +723,16 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             library_path = self.library_broker.path_for_library_id(library_id)
             if library_path is None:
                 return
+            vl = get_virtual_library(query)
 
             def doit():
+                # To maintain compatibility, don't change the VL if it isn't specified.
+                if vl is not None and vl != '_':
+                    self.apply_virtual_library(vl)
                 rows = self.library_view.select_rows((book_id,))
+                if not rows:
+                    self.search.set_search_string('')
+                    rows = self.library_view.select_rows((book_id,))
                 db = self.current_db
                 if not rows and (db.data.get_base_restriction_name() or db.data.get_search_restriction_name()):
                     self.apply_virtual_library()
@@ -739,13 +779,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 if sq:
                     sq = sq[0]
             sq = sq or ''
-            vl = None
-            if query.get('encoded_virtual_library'):
-                vl = bytes.fromhex(query.get('encoded_virtual_library')[0]).decode('utf-8')
-            elif query.get('virtual_library'):
-                vl = query.get('virtual_library')[0]
-            if vl == '-':
-                vl = None
+            vl = get_virtual_library(query)
 
             def doit():
                 if vl != '_':
@@ -867,7 +901,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                             )
                     if repair:
                         from calibre.gui2.dialogs.restore_library import (
-                            repair_library_at
+                            repair_library_at,
                         )
                         if repair_library_at(newloc, parent=self):
                             db = LibraryDatabase(newloc, default_prefs=default_prefs)
@@ -882,6 +916,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                     import traceback
                     traceback.print_exc()
             self.library_path = newloc
+            self.extra_files_watcher.clear()
             prefs['library_path'] = self.library_path
             self.book_on_device(None, reset=True)
             db.set_book_on_device_func(self.book_on_device)
@@ -890,7 +925,6 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             self.library_view.model().set_book_on_device_func(self.book_on_device)
             self.status_bar.clear_message()
             self.search.clear()
-            self.saved_search.clear()
             self.book_details.reset_info()
             # self.library_view.model().count_changed()
             db = self.library_view.model().db
@@ -1060,14 +1094,12 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                     det_msg=job.details, retry_func=retry_func)
 
     def read_settings(self):
-        geometry = config['main_window_geometry']
-        if geometry is not None:
-            QApplication.instance().safe_restore_geometry(self, geometry)
+        self.restore_geometry(gprefs, 'calibre_main_window_geometry', get_legacy_saved_geometry=lambda: config['main_window_geometry'])
         self.read_layout_settings()
 
     def write_settings(self):
         with gprefs:  # Only write to gprefs once
-            config.set('main_window_geometry', self.saveGeometry())
+            self.save_geometry(gprefs, 'calibre_main_window_geometry')
             dynamic.set('sort_history', self.library_view.model().sort_history)
             self.save_layout_state()
             self.stack.tb_widget.save_state()
@@ -1112,14 +1144,6 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             if not question_dialog(self, _('Library updates waiting'), msg):
                 return False
 
-        from calibre.db.delete_service import has_jobs
-        if has_jobs():
-            msg = _('Some deleted books are still being moved to the recycle '
-                    'bin, if you quit now, they will be left behind. Are you '
-                    'sure you want to quit?')
-            if not question_dialog(self, _('Active jobs'), msg):
-                return False
-
         return True
 
     def shutdown(self, write_settings=True):
@@ -1127,6 +1151,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         self.shutdown_started.emit()
         self.show_shutdown_message()
         self.server_change_notification_timer.stop()
+        self.extra_files_watcher.clear()
         try:
             self.event_in_db.disconnect()
         except Exception:
@@ -1200,8 +1225,6 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             self._spare_pool.shutdown()
         from calibre.scraper.simple import cleanup_overseers
         wait_for_cleanup = cleanup_overseers()
-        from calibre.db.delete_service import shutdown
-        shutdown()
         from calibre.live import async_stop_worker
         wait_for_stop = async_stop_worker()
         time.sleep(2)

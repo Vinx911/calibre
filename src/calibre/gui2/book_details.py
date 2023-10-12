@@ -5,48 +5,58 @@
 import os
 import re
 from collections import namedtuple
-from functools import partial
+from contextlib import suppress
+from functools import lru_cache, partial
 from qt.core import (
-    QAction, QApplication, QClipboard, QColor, QDialog, QEasingCurve, QIcon,
-    QKeySequence, QLayout, QMenu, QMimeData, QPainter, QPen, QPixmap,
-    QPropertyAnimation, QRect, QSize, QSizePolicy, Qt, QUrl, QWidget, pyqtProperty,
-    pyqtSignal
+    QAction, QApplication, QClipboard, QColor, QDialog, QEasingCurve, QIcon, QPalette,
+    QKeySequence, QMenu, QMimeData, QPainter, QPen, QPixmap, QPropertyAnimation, QRect,
+    QSize, QSizePolicy, QSplitter, Qt, QTimer, QUrl, QWidget, pyqtProperty, pyqtSignal,
 )
 
 from calibre import fit_image, sanitize_file_name
 from calibre.constants import config_dir, iswindows
+from calibre.db.constants import DATA_DIR_NAME, DATA_FILE_PATTERN
 from calibre.ebooks import BOOK_EXTENSIONS
 from calibre.ebooks.metadata.book.base import Metadata, field_metadata
 from calibre.ebooks.metadata.book.render import mi_to_html
 from calibre.ebooks.metadata.search_internet import (
     all_author_searches, all_book_searches, name_for, url_for_author_search,
-    url_for_book_search
+    url_for_book_search,
 )
 from calibre.gui2 import (
     NO_URL_FORMATTING, choose_save_file, config, default_author_link, gprefs,
-    pixmap_to_data, rating_font, safe_open_url
+    pixmap_to_data, rating_font, safe_open_url,
 )
 from calibre.gui2.dialogs.confirm_delete import confirm, confirm as confirm_delete
 from calibre.gui2.dnd import (
-    dnd_get_files, dnd_get_image, dnd_has_extension, dnd_has_image, image_extensions
+    dnd_get_files, dnd_get_image, dnd_has_extension, dnd_has_image, image_extensions,
 )
 from calibre.gui2.widgets2 import HTMLDisplay
+from calibre.startup import connect_lambda
 from calibre.utils.config import tweaks
 from calibre.utils.img import blend_image, image_from_x
 from calibre.utils.localization import is_rtl, langnames_to_langcodes
+from calibre.utils.resources import get_path as P
 from calibre.utils.serialize import json_loads
 from polyglot.binary import from_hex_bytes
 
 InternetSearch = namedtuple('InternetSearch', 'author where')
 
 
-def set_html(mi, html, text_browser):
+def db_for_mi(mi):
     from calibre.gui2.ui import get_gui
-    gui = get_gui()
+    lp = getattr(mi, 'external_library_path', None)
+    if lp:
+        return get_gui().library_broker.get_library(lp), True
+    return get_gui().current_db, False
+
+
+def set_html(mi, html, text_browser):
     book_id = getattr(mi, 'id', None)
     search_paths = []
-    if gui and book_id is not None:
-        path = gui.current_db.abspath(book_id, index_is_id=True)
+    db, _ = db_for_mi(mi)
+    if db and book_id is not None:
+        path = db.abspath(book_id, index_is_id=True)
         if path:
             search_paths = [path]
     text_browser.setSearchPaths(search_paths)
@@ -65,12 +75,55 @@ def css(reset=False):
     return css.ans
 
 
+def resolve_colors(css):
+    app = QApplication.instance()
+    col = app.palette().color(QPalette.ColorRole.PlaceholderText).name() if app.is_dark_theme else '#666'
+    return css.replace('palette(placeholder-text)', col)
+
+
+def resolved_css():
+    return resolve_colors(css())
+
+
 def copy_all(text_browser):
     mf = getattr(text_browser, 'details', text_browser)
     c = QApplication.clipboard()
     md = QMimeData()
-    md.setText(mf.toPlainText())
-    md.setHtml(mf.toHtml())
+    html = mf.toHtml()
+    md.setHtml(html)
+    from html5_parser import parse
+    from lxml import etree
+    root = parse(html)
+    tables = tuple(root.iterdescendants('table'))
+    for tag in root.iterdescendants(('table', 'tr', 'tbody')):
+        tag.tag = 'div'
+    parent = root
+    is_vertical = getattr(text_browser, 'vertical', True)
+    if not is_vertical:
+        parent = tables[1]
+    for tag in parent.iterdescendants('td'):
+        for child in tag.iterdescendants('br'):
+            child.tag = 'span'
+            child.text = '\ue000'
+        tt = etree.tostring(tag, method='text', encoding='unicode')
+        tag.tag = 'span'
+        for child in tuple(tag):
+            tag.remove(child)
+        tag.text = tt.strip()
+    if not is_vertical:
+        for tag in root.iterdescendants('td'):
+            tag.tag = 'div'
+    for tag in root.iterdescendants('a'):
+        tag.attrib.pop('href', None)
+    from calibre.utils.html2text import html2text
+    simplified_html = etree.tostring(root, encoding='unicode')
+    txt = html2text(simplified_html, single_line_break=True).strip()
+    txt = txt.replace('\ue000', '\n\t')
+    if iswindows:
+        txt = os.linesep.join(txt.splitlines())
+    # print(simplified_html)
+    # print(txt)
+    md.setText(txt)
     c.setMimeData(md)
 
 
@@ -175,13 +228,23 @@ def init_find_in_grouped_search(menu, field, value, book_info):
                     '{}:"={}"'.format(g, value.replace('"', r'\"')), ''))
 
 
-def render_html(mi, vertical, widget, all_fields=False, render_data_func=None, pref_name='book_display_fields'):  # {{{
-    func = render_data_func or render_data
+@lru_cache(maxsize=2)
+def comments_pat():
+    return re.compile(r'<!--.*?-->', re.DOTALL)
+
+
+def render_html(mi, vertical, widget, all_fields=False, render_data_func=None,
+                pref_name='book_display_fields',
+                pref_value=None):  # {{{
+    db, is_external = db_for_mi(mi)
+    show_links = not is_external
+    func = render_data_func or partial(render_data,
+                   vertical_fields=db.prefs.get('book_details_vertical_categories') or ())
     try:
-        table, comment_fields = func(mi, all_fields=all_fields,
+        table, comment_fields = func(mi, all_fields=all_fields, show_links=show_links,
                 use_roman_numbers=config['use_roman_numerals_for_series_number'], pref_name=pref_name)
     except TypeError:
-        table, comment_fields = func(mi, all_fields=all_fields,
+        table, comment_fields = func(mi, all_fields=all_fields, show_links=show_links,
                 use_roman_numbers=config['use_roman_numerals_for_series_number'])
 
     def color_to_string(col):
@@ -203,6 +266,8 @@ def render_html(mi, vertical, widget, all_fields=False, render_data_func=None, p
     comments = ''
     if comment_fields:
         comments = '\n'.join('<div>%s</div>' % x for x in comment_fields)
+        # Comments cause issues with rendering in QTextBrowser
+        comments = comments_pat().sub('', comments)
     right_pane = comments
 
     if vertical:
@@ -214,9 +279,8 @@ def render_html(mi, vertical, widget, all_fields=False, render_data_func=None, p
     return ans
 
 
-def get_field_list(fm, use_defaults=False, pref_name='book_display_fields'):
-    from calibre.gui2.ui import get_gui
-    db = get_gui().current_db
+def get_field_list(fm, use_defaults=False, pref_name='book_display_fields', mi=None):
+    db, _ = db_for_mi(mi)
     if use_defaults:
         src = db.prefs.defaults
     else:
@@ -233,13 +297,16 @@ def get_field_list(fm, use_defaults=False, pref_name='book_display_fields'):
     return [(f, d) for f, d in fieldlist if f in available]
 
 
-def render_data(mi, use_roman_numbers=True, all_fields=False, pref_name='book_display_fields'):
-    field_list = get_field_list(getattr(mi, 'field_metadata', field_metadata), pref_name=pref_name)
+def render_data(mi, use_roman_numbers=True, all_fields=False, pref_name='book_display_fields',
+                vertical_fields=(), show_links=True):
+    field_list = get_field_list(getattr(mi, 'field_metadata', field_metadata),
+                                pref_name=pref_name, mi=mi)
     field_list = [(x, all_fields or display) for x, display in field_list]
     return mi_to_html(
         mi, field_list=field_list, use_roman_numbers=use_roman_numbers, rtl=is_rtl(),
         rating_font=rating_font(), default_author_link=default_author_link(),
-        comments_heading_pos=gprefs['book_details_comments_heading_pos'], for_qt=True
+        comments_heading_pos=gprefs['book_details_comments_heading_pos'], for_qt=True,
+        vertical_fields=vertical_fields, show_links=show_links
     )
 
 # }}}
@@ -347,6 +414,12 @@ def add_item_specific_entries(menu, data, book_info, copy_menu, search_menu):
             ac.data = ('authors', author, book_id)
             ac.setText(_('Remove %s from this book') % escape_for_menu(author))
             menu.addAction(ac)
+        # See if we need to add a click associated link menu line for the author
+        link_map = get_gui().current_db.new_api.get_all_link_maps_for_book(data.get('book_id', -1))
+        link = link_map.get("authors", {}).get(author)
+        if link:
+            menu.addAction(QIcon.ic('external-link'), _('Open associated link'),
+                           lambda : book_info.link_clicked.emit(link))
     elif dt in ('path', 'devpath'):
         path = data['loc']
         ac = book_info.copy_link_action
@@ -355,6 +428,15 @@ def add_item_specific_entries(menu, data, book_info, copy_menu, search_menu):
         ac.current_url = path
         ac.setText(_('The location of the book'))
         copy_menu.addAction(ac)
+    elif dt == 'data-path':
+        path = data['loc']
+        ac = book_info.copy_link_action
+        path = get_gui().library_view.model().db.abspath(data['loc'], index_is_id=True)
+        if path:
+            path = os.path.join(path, DATA_DIR_NAME)
+            ac.current_url = path
+            ac.setText(_('The location of the book\'s data files'))
+            copy_menu.addAction(ac)
     else:
         field = data.get('field')
         if field is not None:
@@ -391,10 +473,17 @@ def add_item_specific_entries(menu, data, book_info, copy_menu, search_menu):
             ac.data = (field, remove_value, book_id)
             ac.setText(_('Remove %s from this book') % escape_for_menu(remove_name or data.get('original_value') or value))
             menu.addAction(ac)
+            # See if we need to add a click associated link menu line
+            link_map = get_gui().current_db.new_api.get_all_link_maps_for_book(data.get('book_id', -1))
+            link = link_map.get(field, {}).get(value)
+            if link:
+                menu.addAction(QIcon.ic('external-link'), _('Open associated link'),
+                               lambda : book_info.link_clicked.emit(link))
         else:
             v = data.get('original_value') or data.get('value')
-            copy_menu.addAction(QIcon.ic('edit-copy.png'), _('The text: {}').format(v),
-                                    lambda: QApplication.instance().clipboard().setText(v))
+            if v:
+                copy_menu.addAction(QIcon.ic('edit-copy.png'), _('The text: {}').format(v),
+                                        lambda: QApplication.instance().clipboard().setText(v))
     return search_internet_added
 
 
@@ -407,13 +496,24 @@ def create_copy_links(menu, data=None):
     library_id = '_hex_-' + library_id.encode('utf-8').hex()
     book_id = get_gui().library_view.current_id
 
+    all_links = []
     def link(text, url):
         def doit():
             QApplication.instance().clipboard().setText(url)
+        nonlocal all_links
+        all_links.append(url)
         menu.addAction(QIcon.ic('edit-copy.png'), text, doit)
 
     menu.addSeparator()
     link(_('Link to show book in calibre'), f'calibre://show-book/{library_id}/{book_id}')
+    link(_('Link to show book details in a popup window'), f'calibre://book-details/{library_id}/{book_id}')
+    mi = db.new_api.get_proxy_metadata(book_id)
+    if mi and mi.path:
+        with suppress(Exception):
+            data_files = db.new_api.list_extra_files(book_id, use_cache=True, pattern=DATA_FILE_PATTERN)
+            if data_files:
+                data_path = os.path.join(db.backend.library_path, mi.path, DATA_DIR_NAME)
+                link(_("Link to open book's data files folder"), bytes(QUrl.fromLocalFile(data_path).toEncoded()).decode('utf-8'))
     if data:
         field = data.get('field')
         if data['type'] == 'author':
@@ -427,6 +527,12 @@ def create_copy_links(menu, data=None):
     for fmt in db.formats(book_id):
         fmt = fmt.upper()
         link(_('Link to view {} format of book').format(fmt.upper()), f'calibre://view-book/{library_id}/{book_id}/{fmt}')
+
+    if all_links:
+        menu.addSeparator()
+        all_links.insert(0, '')
+        all_links.insert(0, mi.get('title') + ' - ' + ' & '.join(mi.get('authors')))
+        link(_('Copy all the above links'), '\n'.join(all_links))
 
 
 def details_context_menu_event(view, ev, book_info, add_popup_action=False, edit_metadata=None):
@@ -453,6 +559,7 @@ def details_context_menu_event(view, ev, book_info, add_popup_action=False, edit
         ac.current_url = url
         ac.setText(_('Copy link location'))
         menu.addAction(ac)
+        menu.addAction(QIcon.ic('external-link'), _('Open associated link'), lambda : book_info.link_clicked.emit(url))
     if not copy_links_added:
         create_copy_links(copy_menu)
 
@@ -473,11 +580,13 @@ def details_context_menu_event(view, ev, book_info, add_popup_action=False, edit
     menu.addSeparator()
     from calibre.gui2.ui import get_gui
     if add_popup_action:
-        ema = get_gui().iactions['Show Book Details'].menuless_qaction
-        menu.addAction(_('Open the Book details window') + '\t' + ema.shortcut().toString(QKeySequence.SequenceFormat.NativeText), book_info.show_book_info)
+        menu.addMenu(get_gui().iactions['Show Book Details'].qaction.menu())
     else:
-        ema = get_gui().iactions['Edit Metadata'].menuless_qaction
-        menu.addAction(_('Open the Edit metadata window') + '\t' + ema.shortcut().toString(QKeySequence.SequenceFormat.NativeText), edit_metadata)
+        # We can't open edit metadata from a locked window because EM expects to
+        # be editing the current book, which this book probably isn't
+        if edit_metadata is not None:
+            ema = get_gui().iactions['Edit Metadata'].menuless_qaction
+            menu.addAction(_('Open the Edit metadata window') + '\t' + ema.shortcut().toString(QKeySequence.SequenceFormat.NativeText), edit_metadata)
     if not reindex_fmt_added:
         menu.addSeparator()
         menu.addAction(_(
@@ -543,6 +652,9 @@ class CoverView(QWidget):  # {{{
 
     def setCurrentPixmapSize(self, val):
         self._current_pixmap_size = val
+
+    def minimumSizeHint(self):
+        return QSize(100, 100)
 
     def do_layout(self):
         if self.rect().width() == 0 or self.rect().height() == 0:
@@ -648,7 +760,7 @@ class CoverView(QWidget):  # {{{
         book_id = self.data.get('id')
         if not book_id:
             return
-        from calibre.utils.img import image_from_x, remove_borders_from_image
+        from calibre.utils.img import remove_borders_from_image
         img = image_from_x(self.pixmap)
         nimg = remove_borders_from_image(img)
         if nimg is not img:
@@ -874,6 +986,9 @@ class BookInfo(HTMLDisplay):
         html = render_html(mi, self.vertical, self.parent())
         set_html(mi, html, self)
 
+    def process_external_css(self, css):
+        return resolve_colors(css)
+
     def mouseDoubleClickEvent(self, ev):
         v = self.viewport()
         if v.rect().contains(self.mapFromGlobal(ev.globalPos())):
@@ -906,37 +1021,39 @@ class BookInfo(HTMLDisplay):
 # }}}
 
 
-class DetailsLayout(QLayout):  # {{{
+class DetailsLayout(QSplitter):  # {{{
 
     def __init__(self, vertical, parent):
-        QLayout.__init__(self, parent)
+        orientation = Qt.Orientation.Vertical if vertical else Qt.Orientation.Horizontal
+        super().__init__(orientation, parent)
         self.vertical = vertical
         self._children = []
-
         self.min_size = QSize(190, 200) if vertical else QSize(120, 120)
         self.setContentsMargins(0, 0, 0, 0)
+        self.splitterMoved.connect(self.do_splitter_moved,
+                                   type=Qt.ConnectionType.QueuedConnection)
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.setInterval(5)
+        self.resize_timer.timeout.connect(self.do_resize)
+
+    def do_resize(self, *args):
+        super().resizeEvent(self._resize_ev)
+        self.do_layout(self.rect())
+
+    def resizeEvent(self, ev):
+        if self.resize_timer.isActive():
+            self.resize_timer.stop()
+        self._resize_ev = ev
+        self.resize_timer.start()
 
     def minimumSize(self):
         return QSize(self.min_size)
 
-    def addItem(self, child):
+    def addWidget(self, child):
         if len(self._children) > 2:
             raise ValueError('This layout can only manage two children')
         self._children.append(child)
-
-    def itemAt(self, i):
-        try:
-            return self._children[i]
-        except:
-            pass
-        return None
-
-    def takeAt(self, i):
-        try:
-            self._children.pop(i)
-        except:
-            pass
-        return None
 
     def count(self):
         return len(self._children)
@@ -944,16 +1061,29 @@ class DetailsLayout(QLayout):  # {{{
     def sizeHint(self):
         return QSize(self.min_size)
 
+    def restore_splitter_state(self):
+        s = gprefs.get('book_details_widget_splitter_state')
+        if s is None:
+            # Without this on first start the splitter is rendered over the cover
+            self.setSizes([20, 80])
+        else:
+            self.restoreState(s)
+        self.setOrientation(Qt.Orientation.Vertical if self.vertical else Qt.Orientation.Horizontal)
+
     def setGeometry(self, r):
-        QLayout.setGeometry(self, r)
+        super().setGeometry(r)
         self.do_layout(r)
 
+    def do_splitter_moved(self, *args):
+        gprefs['book_details_widget_splitter_state'] = bytearray(self.saveState())
+        self._children[0].do_layout()
+
     def cover_height(self, r):
-        if not self._children[0].widget().isVisible():
+        if not self._children[0].isVisible():
             return 0
         mh = min(int(r.height()//2), int(4/3 * r.width())+1)
         try:
-            ph = self._children[0].widget().pixmap.height()
+            ph = self._children[0].pixmap.height()
         except:
             ph = 0
         if ph > 0:
@@ -961,11 +1091,11 @@ class DetailsLayout(QLayout):  # {{{
         return mh
 
     def cover_width(self, r):
-        if not self._children[0].widget().isVisible():
+        if not self._children[0].isVisible():
             return 0
         mw = 1 + int(3/4 * r.height())
         try:
-            pw = self._children[0].widget().pixmap.width()
+            pw = self._children[0].pixmap.width()
         except:
             pw = 0
         if pw > 0:
@@ -975,7 +1105,11 @@ class DetailsLayout(QLayout):  # {{{
     def do_layout(self, rect):
         if len(self._children) != 2:
             return
-        left, top, right, bottom = self.getContentsMargins()
+        cm = self.contentsMargins()
+        left = cm.left()
+        top = cm.top()
+        right = cm.right()
+        bottom = cm.top()
         r = rect.adjusted(+left, +top, -right, -bottom)
         x = r.x()
         y = r.y()
@@ -983,23 +1117,23 @@ class DetailsLayout(QLayout):  # {{{
         if self.vertical:
             ch = self.cover_height(r)
             cover.setGeometry(QRect(x, y, r.width(), ch))
-            cover.widget().do_layout()
             y += ch + 5
             details.setGeometry(QRect(x, y, r.width(), r.height()-ch-5))
         else:
             cw = self.cover_width(r)
             cover.setGeometry(QRect(x, y, cw, r.height()))
-            cover.widget().do_layout()
             x += cw + 5
             details.setGeometry(QRect(x, y, r.width() - cw - 5, r.height()))
-
+        self.restore_splitter_state()  # only required on first call to do_layout, but ...
+        cover.do_layout()
 # }}}
 
 
-class BookDetails(QWidget):  # {{{
+class BookDetails(DetailsLayout):  # {{{
 
     show_book_info = pyqtSignal()
     open_containing_folder = pyqtSignal(int)
+    open_data_folder = pyqtSignal(int)
     view_specific_format = pyqtSignal(int, object)
     search_requested = pyqtSignal(object, object)
     remove_specific_format = pyqtSignal(int, object)
@@ -1068,11 +1202,10 @@ class BookDetails(QWidget):  # {{{
     # }}}
 
     def __init__(self, vertical, parent=None):
-        QWidget.__init__(self, parent)
+        DetailsLayout.__init__(self, vertical, parent)
         self.last_data = {}
         self.setAcceptDrops(True)
-        self._layout = DetailsLayout(vertical, self)
-        self.setLayout(self._layout)
+        self._layout = self
         self.current_path = ''
 
         self.cover_view = CoverView(vertical, self)
@@ -1150,6 +1283,8 @@ class BookDetails(QWidget):  # {{{
                     browse(data['url'])
             elif dt == 'path':
                 self.open_containing_folder.emit(int(data['loc']))
+            elif dt == 'data-path':
+                self.open_data_folder.emit(int(data['loc']))
             elif dt == 'devpath':
                 self.view_device_book.emit(data['loc'])
         else:

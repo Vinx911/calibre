@@ -5,15 +5,18 @@ __license__   = 'GPL v3'
 __copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import copy, traceback
+import copy
+import traceback
 
 from calibre import prints
 from calibre.constants import DEBUG
-from calibre.ebooks.metadata.book import (SC_COPYABLE_FIELDS,
-        SC_FIELDS_COPY_NOT_NULL, STANDARD_METADATA_FIELDS,
-        TOP_LEVEL_IDENTIFIERS, ALL_METADATA_FIELDS)
+from calibre.ebooks.metadata.book import (
+    ALL_METADATA_FIELDS, SC_COPYABLE_FIELDS, SC_FIELDS_COPY_NOT_NULL,
+    STANDARD_METADATA_FIELDS, TOP_LEVEL_IDENTIFIERS,
+)
 from calibre.library.field_metadata import FieldMetadata
-from calibre.utils.icu import sort_key
+from calibre.utils.icu import lower as icu_lower, sort_key
+from calibre.utils.localization import ngettext
 from polyglot.builtins import iteritems, string_or_bytes
 
 # Special sets used to optimize the performance of getting and setting
@@ -26,8 +29,8 @@ def human_readable(size, precision=2):
     """ Convert a size in bytes into megabytes """
     ans = size/(1024*1024)
     if ans < 0.1:
-        return '<0.1MB'
-    return ('%.'+str(precision)+'f'+ 'MB') % ans
+        return '<0.1 MB'
+    return ('%.'+str(precision)+'f'+ ' MB') % ans
 
 
 NULL_VALUES = {
@@ -42,7 +45,7 @@ NULL_VALUES = {
                 'author_sort'  : _('Unknown'),
                 'title'        : _('Unknown'),
                 'user_categories' : {},
-                'author_link_map' : {},
+                'link_maps'    : {},
                 'language'     : 'und'
 }
 
@@ -54,8 +57,12 @@ def reset_field_metadata():
     field_metadata = FieldMetadata()
 
 
-ck = lambda typ: icu_lower(typ).strip().replace(':', '').replace(',', '')
-cv = lambda val: val.strip().replace(',', '|')
+def ck(typ):
+    return icu_lower(typ).strip().replace(':', '').replace(',', '')
+
+
+def cv(val):
+    return val.strip().replace(',', '|')
 
 
 class Metadata:
@@ -732,8 +739,8 @@ class Metadata:
         A string representation of this object, suitable for printing to
         console
         '''
-        from calibre.utils.date import isoformat
         from calibre.ebooks.metadata import authors_to_string
+        from calibre.utils.date import isoformat
         ans = []
 
         def fmt(x, y):

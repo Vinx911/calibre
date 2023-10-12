@@ -144,8 +144,8 @@ calibre's plugin loading system defines a couple of built-in functions that allo
         a forward slash as the path separator, even on Windows. When you pass
         in a single name, the function will return the raw bytes of that file
         or None if the name was not found in the ZIP file. If you pass in more
-        than one name then it returns a dict mapping the names to bytes.  If a
-        name is not found, it will not be present in the returned dict.
+        than one name then it returns a dictionary mapping the names to bytes.  If a
+        name is not found, it will not be present in the returned dictionary.
 
     **get_icons(name_or_list_of_names, plugin_name='')**
         A wrapper for get_resources() that creates QIcon objects
@@ -285,12 +285,17 @@ typical User Interface plugin you would call it at the top of ``ui.py`` but not
 ``__init__.py``.
 
 You can test the translations of your plugins by changing the user interface
-language in calibre under :guilabel:`Preferences->Interface->Look & feel` or by running calibre like
-this::
+language in calibre under :guilabel:`Preferences->Interface->Look & feel` or by running calibre
+with the ``CALIBRE_OVERRIDE_LANG`` environment variable set. For example::
 
-    CALIBRE_OVERRIDE_LANG=de calibre
+    CALIBRE_OVERRIDE_LANG=de
 
 Replace ``de`` with the language code of the language you want to test.
+
+For translations with plurals, use the ``ngettext()`` function instead of
+``_()``. For example::
+
+    ngettext('Delete a book', 'Delete {} books', num_books).format(num_books)
 
 The plugin API
 --------------------------------

@@ -1,40 +1,39 @@
 #!/usr/bin/env python
 # License: GPL v3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
 
-
 import os
 import shutil
 import sys
 from itertools import count
 from qt.core import (
-    QT_VERSION, QApplication, QByteArray, QEvent, QFontDatabase, QFontInfo,
-    QHBoxLayout, QLocale, QMimeData, QPalette, QSize, Qt, QTimer, QUrl, QWidget,
-    pyqtSignal, sip
+    QT_VERSION, QApplication, QByteArray, QEvent, QFontDatabase, QFontInfo, QHBoxLayout,
+    QLocale, QMimeData, QPalette, QSize, Qt, QTimer, QUrl, QWidget, pyqtSignal, sip,
 )
 from qt.webengine import (
     QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
-    QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler, QWebEngineView
+    QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler, QWebEngineView,
 )
 
 from calibre import as_unicode, prints
 from calibre.constants import (
     FAKE_HOST, FAKE_PROTOCOL, __version__, in_develop_mode, is_running_from_develop,
-    ismacos, iswindows
+    ismacos, iswindows,
 )
 from calibre.ebooks.metadata.book.base import field_metadata
 from calibre.ebooks.oeb.polish.utils import guess_type
 from calibre.gui2 import choose_images, config, error_dialog, safe_open_url
-from calibre.gui2.viewer import link_prefix_for_location_links, performance_monitor
+from calibre.gui2.viewer import link_prefix_for_location_links, performance_monitor, url_for_book_in_library
 from calibre.gui2.viewer.config import viewer_config_dir, vprefs
 from calibre.gui2.viewer.tts import TTS
 from calibre.gui2.webengine import RestartingWebEngineView
 from calibre.srv.code import get_translations_data
-from calibre.utils.localization import localize_user_manual_link
+from calibre.utils.localization import _, localize_user_manual_link
+from calibre.utils.resources import get_path as P
 from calibre.utils.serialize import json_loads
 from calibre.utils.shared_file import share_open
 from calibre.utils.webengine import (
     Bridge, create_script, from_js, insert_scripts, secure_webengine, send_reply,
-    to_js, setup_profile
+    setup_profile, to_js,
 )
 from polyglot.builtins import as_bytes, iteritems
 from polyglot.functools import lru_cache
@@ -103,7 +102,7 @@ def handle_mathjax_request(rq, name):
     if path.startswith(mathjax_dir):
         mt = guess_type(name)
         try:
-            with lopen(path, 'rb') as f:
+            with open(path, 'rb') as f:
                 raw = f.read()
         except OSError as err:
             prints(f"Failed to get mathjax file: {name} with error: {err}", file=sys.stderr)
@@ -150,6 +149,8 @@ class UrlSchemeHandler(QWebEngineUrlSchemeHandler):
                     'application/x-font-truetype':'application/x-font-ttf',
                     'application/font-sfnt': 'application/x-font-ttf',
                 }.get(mime_type, mime_type)
+                if mime_type == 'text/css':
+                    mime_type += '; charset=utf-8'
                 send_reply(rq, mime_type, data)
             except Exception:
                 import traceback
@@ -294,7 +295,7 @@ def apply_font_settings(page_or_view):
     if fs.get('mono_family'):
         s.setFontFamily(QWebEngineSettings.FontFamily.FixedFont, fs.get('mono_family'))
     else:
-        s.resetFontFamily(QWebEngineSettings.FontFamily.SansSerifFont)
+        s.resetFontFamily(QWebEngineSettings.FontFamily.FixedFont)
     sf = fs.get('standard_font') or 'serif'
     sf = getattr(QWebEngineSettings.FontFamily, {'serif': 'SerifFont', 'sans': 'SansSerifFont', 'mono': 'FixedFont'}[sf])
     s.setFontFamily(QWebEngineSettings.FontFamily.StandardFont, s.fontFamily(sf))
@@ -357,7 +358,7 @@ class WebPage(QWebEnginePage):
             return True
         if url.scheme() in (FAKE_PROTOCOL, 'data'):
             return True
-        if url.scheme() in ('http', 'https') and req_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
+        if url.scheme() in ('http', 'https', 'calibre') and req_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
             safe_open_url(url)
         prints('Blocking navigation request to:', url.toString())
         return False
@@ -630,7 +631,10 @@ class WebView(RestartingWebEngineView):
     def start_book_load(self, initial_position=None, highlights=None, current_book_data=None, reading_rates=None):
         key = (set_book_path.path,)
         book_url = link_prefix_for_location_links(add_open_at=False)
-        self.execute_when_ready('start_book_load', key, initial_position, set_book_path.pathtoebook, highlights or [], book_url, reading_rates)
+        book_in_library_url = url_for_book_in_library()
+        self.execute_when_ready(
+            'start_book_load', key, initial_position, set_book_path.pathtoebook, highlights or [], book_url,
+            reading_rates, book_in_library_url)
 
     def execute_when_ready(self, action, *args):
         if self.bridge.ready:
@@ -708,7 +712,8 @@ class WebView(RestartingWebEngineView):
         self._page.profile().clearHttpCache()
 
     def trigger_shortcut(self, which):
-        self.execute_when_ready('trigger_shortcut', which)
+        if which:
+            self.execute_when_ready('trigger_shortcut', which)
 
     def show_search_result(self, sr):
         self.execute_when_ready('show_search_result', sr)
@@ -743,5 +748,5 @@ class WebView(RestartingWebEngineView):
     def repair_after_fullscreen_switch(self):
         self.execute_when_ready('repair_after_fullscreen_switch')
 
-    def remove_recently_opened(self, path):
+    def remove_recently_opened(self, path=''):
         self.generic_action('remove-recently-opened', {'path': path})

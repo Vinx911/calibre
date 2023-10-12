@@ -25,6 +25,7 @@ DEFAULT_COLORS = {
     'window-error-foreground': c('red', '#C40233'),
     'window-hover-foreground': c('red', '#C40233'),
     'link-foreground': c('blue', '#6cb4ee'),
+    'faded-text': c('#666', '#7f7f7f'),
 
     # Top bar specific colors
     'bar-background': c(DARK, DT_DARK_LIGHTER),
@@ -79,6 +80,10 @@ def set_ui_colors(is_dark_theme):
 
 def browser_in_dark_mode():
     return window.matchMedia('(prefers-color-scheme: dark)').matches
+
+
+def color_scheme():
+    return 'dark' if browser_in_dark_mode() or document.documentElement.style.colorScheme is 'dark' else 'light'
 
 
 def css_for_variables():

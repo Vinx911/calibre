@@ -6,14 +6,15 @@ __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 import os.path
-
 from qt.core import (
-    QDialog, QGridLayout, QIcon, QLabel, QTreeWidget, QTreeWidgetItem, Qt,
-    QFont, QDialogButtonBox, QApplication)
+    QApplication, QDialog, QDialogButtonBox, QFont, QGridLayout, QIcon, QLabel, Qt,
+    QTreeWidget, QTreeWidgetItem,
+)
 
-from calibre.gui2 import gprefs
 from calibre.ebooks.metadata import authors_to_string
+from calibre.gui2 import gprefs
 from calibre.utils.icu import primary_sort_key
+from calibre.utils.localization import ngettext
 
 
 class DuplicatesQuestion(QDialog):
@@ -59,9 +60,7 @@ class DuplicatesQuestion(QDialog):
         cb.clicked.connect(self.copy_to_clipboard)
 
         self.resize(self.sizeHint())
-        geom = gprefs.get('duplicates-question-dialog-geometry', None)
-        if geom is not None:
-            QApplication.instance().safe_restore_geometry(self, geom)
+        self.restore_geometry(gprefs, 'duplicates-question-dialog-geometry')
         self.exec()
 
     def copy_to_clipboard(self):
@@ -87,7 +86,7 @@ class DuplicatesQuestion(QDialog):
         QDialog.accept(self)
 
     def save_geometry(self):
-        gprefs.set('duplicates-question-dialog-geometry', bytearray(self.saveGeometry()))
+        super().save_geometry(gprefs, 'duplicates-question-dialog-geometry')
 
     def process_duplicates(self, db, duplicates):
         ta = _('%(title)s by %(author)s [%(formats)s]')

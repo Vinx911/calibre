@@ -7,6 +7,7 @@ from elementmaker import E
 import read_book.iframe  # noqa
 from ajax import ajax_send
 from book_list.globals import get_session_data
+from book_list.home import update_book_in_recently_read_by_user_on_home_page
 from book_list.theme import cached_color_to_rgba, get_color, set_ui_colors
 from book_list.ui import query_as_href
 from dom import add_extra_css, build_rule, clear, set_css, svgicon, unique_id
@@ -116,12 +117,15 @@ def show_controls_help():
         return set_css(E.div(txt), padding='1ex 1em', text_align='center', margin='auto')
 
     left_msg = msg(_('Tap to turn back'))
-    left_width = '25vw'
+    left_width = 'min(25vw, 1in)'
     right_msg = msg(_('Tap to turn page'))
-    right_width = '75vw'
+    right_width = 'auto'
+    left_grow = 0
+    right_grow = 1
     if rtl_page_progression():
         left_msg, right_msg = right_msg, left_msg
         left_width, right_width = right_width, left_width
+        left_grow, right_grow = right_grow, left_grow
 
     # Clear it out if this is not the first time it's created.
     # Needed to correctly show it again in a different page progression direction.
@@ -139,11 +143,11 @@ def show_controls_help():
             style="display: flex; align-items: stretch; flex-grow: 10",
             E.div(
                 left_msg,
-                style=f'width: {left_width}; display:flex; align-items: center; border-right: solid 2px currentColor',
+                style=f'width: {left_width}; flex-grow: {left_grow}; display:flex; align-items: center; border-right: solid 2px currentColor',
             ),
             E.div(
                 right_msg,
-                style=f'width: {right_width}; display:flex; align-items: center',
+                style=f'width: {right_width}; display:flex; flex-grow: {right_grow}; align-items: center',
             )
         )
     ))
@@ -464,6 +468,8 @@ class View:
             self.selection_bar.update_position()
 
     def on_handle_shortcut(self, data):
+        if not data.name:
+            return
         if data.name is 'back':
             window.history.back()
         elif data.name is 'forward':
@@ -524,7 +530,7 @@ class View:
         elif data.name is 'toggle_read_aloud':
             self.toggle_read_aloud()
         elif data.name is 'reload_book':
-            ui_operations.reload_book()
+            self.reload_book()
         elif data.name is 'sync_book':
             self.overlay.sync_book()
         elif data.name is 'next_section':
@@ -856,6 +862,12 @@ class View:
         self.show_loading_callback_timer = setTimeout(self.show_loading_message.bind(None, msg), 200)
 
     def hide_loading(self):
+        if window.read_book_initial_open_search_text:
+            q = window.read_book_initial_open_search_text
+            v'delete window.read_book_initial_open_search_text'
+            self.search_overlay.do_initial_search(q.text, q.query)
+            self.show_loading_message(_('Searching for: {}').format(q.query))
+            return
         if self.show_loading_callback_timer is not None:
             clearTimeout(self.show_loading_callback_timer)
             self.show_loading_callback_timer = None
@@ -884,17 +896,27 @@ class View:
                 'library_id': self.book.key[0], 'book_id': self.book.key[1] + '', 'close_action': 'book_list',
             }, 'book_details'))
 
+    def clear_book_resource_caches(self):
+        self.loaded_resources = {}
+        self.content_popup_overlay.loaded_resources = {}
+
+    def reload_book(self):
+        self.clear_book_resource_caches()
+        ui_operations.reload_book()
+
     def display_book(self, book, initial_position, is_redisplay):
         self.hide_overlays()
         self.iframe.focus()
         is_current_book = self.book and self.book.key == book.key
         self.book_load_started = True
-        if not is_current_book:
+        if is_current_book:
+            if not is_redisplay:
+                self.search_overlay.clear_caches(book)  # could be a reload
+        else:
             if self.book:
                 self.iframe_wrapper.reset()
                 self.content_popup_overlay.reset()
-            self.loaded_resources = {}
-            self.content_popup_overlay.loaded_resources = {}
+            self.clear_book_resource_caches()
             self.timers.start_book(book)
             self.search_overlay.clear_caches(book)
         unkey = username_key(get_interface_data().username)
@@ -996,13 +1018,14 @@ class View:
             'hide_tooltips': sd.get('hide_tooltips'),
             'cover_preserve_aspect_ratio': sd.get('cover_preserve_aspect_ratio'),
             'paged_wheel_scrolls_by_screen': sd.get('paged_wheel_scrolls_by_screen'),
+            'paged_wheel_section_jumps': sd.get('paged_wheel_section_jumps'),
             'paged_pixel_scroll_threshold': sd.get('paged_pixel_scroll_threshold'),
-            'paged_taps_scroll_by_screen': sd.get('paged_taps_scroll_by_screen'),
             'lines_per_sec_auto': sd.get('lines_per_sec_auto'),
             'lines_per_sec_smooth': sd.get('lines_per_sec_smooth'),
             'scroll_auto_boundary_delay': sd.get('scroll_auto_boundary_delay'),
             'scroll_stop_boundaries': sd.get('scroll_stop_boundaries'),
             'reverse_page_turn_zones': sd.get('reverse_page_turn_zones'),
+            'gesture_overrides': sd.get('gesture_overrides'),
         }
 
     def show_name(self, name, initial_position=None):
@@ -1226,6 +1249,7 @@ class View:
                     if end_type is not 'load':
                         print('Failed to update last read position, AJAX call did not succeed')
             )
+            update_book_in_recently_read_by_user_on_home_page(key[0], key[1], key[2], data.cfi)
 
     @property
     def current_position_data(self):
@@ -1385,8 +1409,19 @@ class View:
             ui_operations.reference_mode_changed(self.reference_mode_enabled)
 
     def discover_search_result(self, sr):
+        if sr.search_finished:
+            if self.search_result_discovery:
+                self.search_result_discovery.finished = True
+                if not self.search_result_discovery.discovered and self.search_result_discovery.first_search_result and self.search_result_discovery.queue.length is 0:
+                    sr = self.search_result_discovery.first_search_result
+                    sr.force_jump_to = True
+                    self.show_search_result(sr)
+            return
         if sr.result_num is 1:
-            self.search_result_discovery = {'queue': v'[]', 'on_discovery': sr.on_discovery, 'in_flight': None, 'discovered': False}
+            self.search_result_discovery = {
+                'queue': v'[]', 'on_discovery': sr.on_discovery, 'in_flight': None, 'discovered': False,
+                'first_search_result': sr, 'finished': False,
+            }
         if not self.search_result_discovery or self.search_result_discovery.discovered or self.search_result_discovery.on_discovery is not sr.on_discovery:
             return
         self.search_result_discovery.queue.push(sr)
@@ -1402,6 +1437,10 @@ class View:
                     ui_operations.search_result_discovered(sr)
             elif not self.search_result_discovery.discovered and self.search_result_discovery.queue.length:
                 self.show_search_result(self.search_result_discovery.queue.shift())
+            elif not self.search_result_discovery.discovered and self.search_result_discovery.finished:
+                sr = self.search_result_discovery.first_search_result
+                sr.force_jump_to = True
+                self.show_search_result(sr)
 
     def search_result_discovered(self, data):
         self.handle_search_result_discovery(data.search_result, data.discovered)

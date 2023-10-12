@@ -133,11 +133,14 @@ Changing text file order
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 You can re-arrange the order in which text (HTML) files are opened when reading
-the book by simply dragging and dropping them in the Files browser. For the
-technically inclined, this is called re-ordering the book spine. Note that you
-have to drop the items *between* other items, not on top of them, this can be a
-little fiddly until you get used to it. Dropping on top of another file will
-cause the files to be merged.
+the book by simply dragging and dropping them in the :guilabel:`File browser` or clicking
+on the file to move and then pressing the :kbd:`Ctrl+Shift` modifiers with the
+:kbd:`Up`, :kbd:`Down`, :kbd:`Home` or :kbd:`End` keys. For the technically
+inclined, this is called re-ordering the book spine.
+
+Note that you have to drop the items *between* other items, not on top of them,
+this can be a little fiddly until you get used to it. Dropping on top of
+another file will cause the files to be merged.
 
 Marking the cover
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -814,7 +817,8 @@ The HTML editor has very sophisticated syntax highlighting. Features include:
     * As you move your cursor through the HTML, the matching HTML tags are
       highlighted, and you can jump to the opening or closing tag with the
       keyboard shortcuts :kbd:`Ctrl+{` and :kbd:`Ctrl+}`. Similarly, you
-      can select the contents of a tag with :kbd:`Ctrl+Alt+T`.
+      can select the contents of a tag with :kbd:`Ctrl+Alt+T` or
+      :kbd:`Ctrl+Shift+T`.
     * Invalid HTML is highlighted with a red underline
     * Spelling errors in the text inside HTML tags and attributes such as title
       are highlighted. The spell checking is language aware, based on the value

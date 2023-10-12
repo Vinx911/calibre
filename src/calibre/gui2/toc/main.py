@@ -8,29 +8,28 @@ import tempfile
 import textwrap
 from functools import partial
 from qt.core import (
-    QAbstractItemView, QApplication, QCheckBox, QCursor, QDialog, QDialogButtonBox,
-    QEvent, QFrame, QGridLayout, QIcon, QInputDialog, QItemSelectionModel,
-    QKeySequence, QLabel, QMenu, QPushButton, QScrollArea, QSize, QSizePolicy,
-    QStackedWidget, Qt, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget, pyqtSignal
+    QAbstractItemView, QCheckBox, QCursor, QDialog, QDialogButtonBox, QEvent, QFrame,
+    QGridLayout, QIcon, QInputDialog, QItemSelectionModel, QKeySequence, QLabel, QMenu,
+    QPushButton, QScrollArea, QSize, QSizePolicy, QStackedWidget, Qt, QTimer,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal,
 )
 from threading import Thread
 from time import monotonic
 
-from calibre.constants import TOC_DIALOG_APP_UID, islinux, iswindows
+from calibre.constants import TOC_DIALOG_APP_UID, islinux, ismacos, iswindows
 from calibre.ebooks.oeb.polish.container import AZW3Container, get_container
 from calibre.ebooks.oeb.polish.toc import (
-    TOC, add_id, commit_toc, from_files, from_links, from_xpaths, get_toc
+    TOC, add_id, commit_toc, from_files, from_links, from_xpaths, get_toc,
 )
-from calibre.gui2 import (
-    Application, error_dialog, info_dialog, set_app_uid
-)
+from calibre.gui2 import Application, error_dialog, info_dialog, set_app_uid
 from calibre.gui2.convert.xpath_wizard import XPathEdit
 from calibre.gui2.progress_indicator import ProgressIndicator
 from calibre.gui2.toc.location import ItemEdit
 from calibre.ptempfile import reset_base_dir
+from calibre.startup import connect_lambda
 from calibre.utils.config import JSONConfig
 from calibre.utils.filenames import atomic_rename
+from calibre.utils.icu import lower as icu_lower, upper as icu_upper
 from calibre.utils.logging import GUILog
 
 ICON_SIZE = 24
@@ -1022,8 +1021,7 @@ class TOCEditor(QDialog):  # {{{
         l.addWidget(s)
         self.loading_widget = lw = QWidget(self)
         s.addWidget(lw)
-        ll = self.ll = QVBoxLayout()
-        lw.setLayout(ll)
+        ll = self.ll = QVBoxLayout(lw)
         self.pi = pi = ProgressIndicator()
         pi.setDisplaySize(QSize(200, 200))
         pi.startAnimation()
@@ -1052,13 +1050,12 @@ class TOCEditor(QDialog):  # {{{
         self.explode_done.connect(self.read_toc, type=Qt.ConnectionType.QueuedConnection)
         self.writing_done.connect(self.really_accept, type=Qt.ConnectionType.QueuedConnection)
 
-        r = self.screen().availableSize()
-        self.resize(r.width() - 100, r.height() - 100)
-        geom = self.prefs.get('toc_editor_window_geom', None)
-        if geom is not None:
-            QApplication.instance().safe_restore_geometry(self, bytes(geom))
+        self.restore_geometry(self.prefs, 'toc_editor_window_geom')
         self.stacks.currentChanged.connect(self.update_history_buttons)
         self.update_history_buttons()
+
+    def sizeHint(self):
+        return QSize(900, 600)
 
     def update_history_buttons(self):
         self.undo_button.setVisible(self.stacks.currentIndex() == 1)
@@ -1067,6 +1064,15 @@ class TOCEditor(QDialog):  # {{{
     def add_new_item(self, item, where):
         self.item_edit(item, where)
         self.stacks.setCurrentIndex(2)
+        if ismacos:
+            QTimer.singleShot(0, self.workaround_macos_mouse_with_webview_bug)
+
+    def workaround_macos_mouse_with_webview_bug(self):
+        # macOS is weird: https://bugs.launchpad.net/calibre/+bug/2004639
+        # needed as of Qt 6.4.2
+        d = info_dialog(self, _('Loading...'), _('Loading table of contents view, please wait...'), show_copy_button=False)
+        QTimer.singleShot(0, d.reject)
+        d.exec()
 
     def accept(self):
         if monotonic() - self.last_accept_at < 1:
@@ -1086,7 +1092,7 @@ class TOCEditor(QDialog):  # {{{
             self.bb.setEnabled(False)
 
     def really_accept(self, tb):
-        self.prefs['toc_editor_window_geom'] = bytearray(self.saveGeometry())
+        self.save_geometry(self.prefs, 'toc_editor_window_geom')
         if tb:
             error_dialog(self, _('Failed to write book'),
                 _('Could not write %s. Click "Show details" for'
@@ -1107,7 +1113,7 @@ class TOCEditor(QDialog):  # {{{
             self.stacks.setCurrentIndex(1)
         else:
             self.working = False
-            self.prefs['toc_editor_window_geom'] = bytearray(self.saveGeometry())
+            self.save_geometry(self.prefs, 'toc_editor_window_geom')
             self.write_result(1)
             super().reject()
 
@@ -1129,7 +1135,7 @@ class TOCEditor(QDialog):  # {{{
         tb = None
         try:
             self.ebook = get_container(self.pathtobook, log=self.log)
-        except:
+        except Exception:
             import traceback
             tb = traceback.format_exc()
         if self.working:
@@ -1164,9 +1170,21 @@ class TOCEditor(QDialog):  # {{{
 # }}}
 
 
+def develop():
+    from calibre.utils.webengine import setup_fake_protocol
+    setup_fake_protocol()
+    from calibre.gui2 import Application
+    app = Application([])
+    d = TOCEditor(sys.argv[-1])
+    d.start()
+    d.exec()
+    del app
+
+
 def main(shm_name=None):
     import json
     import struct
+
     from calibre.utils.shm import SharedMemory
 
     # Ensure we can continue to function if GUI is closed
@@ -1189,8 +1207,8 @@ def main(shm_name=None):
         override = 'calibre-gui' if islinux else None
         app = Application([], override_program_name=override)
         from calibre.utils.webengine import setup_default_profile, setup_fake_protocol
-        setup_default_profile()
         setup_fake_protocol()
+        setup_default_profile()
         d = TOCEditor(path, title=title, write_result_to=path + '.result')
         d.start()
         ok = 0
