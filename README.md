@@ -34,6 +34,8 @@ GitHub is only used for code hosting and pull requests.
 
 ## Support calibre
 
+
+
 calibre is a result of the efforts of many volunteers from all over the world.
 If you find it useful, please consider contributing to support its development.
 [Donate to support calibre development](https://calibre-ebook.com/donate).
